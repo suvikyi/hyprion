@@ -64,6 +64,7 @@ uniform sampler2D uVertical;
 uniform sampler2D uSnapshot;
 uniform int uFullSnapshot;
 uniform int uAreaMode;
+uniform int uComposite;
 uniform vec4 uWindowBox;
 uniform float uThickness;
 uniform bool uOutset;
@@ -397,15 +398,11 @@ void main() {
         vec4 orbitColor = mix(sampleColor, orbitTransformed, uOrbitStrength);
         color = mix(color, orbitColor, orbitMask);
     }
-    if (uOutset) {
-        // Native borders blend their coverage over the already-rendered surface.
-        // The outset's source is pre-shadow, but its destination must remain live:
-        // opacity lowers the premultiplied coverage so the live backdrop shows
-        // through the frost.
+    if (uComposite == 2) {
+        // Premultiplied source-over: the destination stays live outside coverage.
         fragColor = color * band;
     } else {
-        // The inset replaces pixels whose backdrop is the sample itself, so the
-        // coverage falls back to the sample instead of blending.
+        // Replace/interpolate against the sampled pixel.
         fragColor = mix(sampleColor, color, band);
     }
 }

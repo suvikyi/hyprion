@@ -14,6 +14,7 @@
 
 namespace {
     constexpr uint32_t SUPPORTED_AREAS = HYPRION_GRADE_V1_AREA_INSET | HYPRION_GRADE_V1_AREA_OUTSET | HYPRION_GRADE_V1_AREA_FILL;
+    constexpr uint32_t SUPPORTED_COMPOSITES = HYPRION_GRADE_V1_COMPOSITE_REPLACE | HYPRION_GRADE_V1_COMPOSITE_OVER;
 
     SHyprionStyle styleFromWire(wl_fixed_t lightness, wl_fixed_t saturation, wl_fixed_t chroma, wl_fixed_t hue, wl_fixed_t strength, wl_fixed_t opacity,
                                 uint32_t tint, wl_fixed_t tintStrength) {
@@ -89,6 +90,16 @@ void CHyprionGrade::setResource(SP<CHyprionGradeV1> resource) {
         m_areas = requested;
         m_inset = std::max(0, inset);
         m_outset = std::max(0, outset);
+        damage();
+    });
+
+    m_resource->setSetComposite([this](CHyprionGradeV1*, hyprionGradeV1Composite composite) {
+        const uint32_t requested = static_cast<uint32_t>(composite);
+        if ((requested & SUPPORTED_COMPOSITES) == 0) {
+            m_resource->error(HYPRION_GRADE_V1_ERROR_UNSUPPORTED, "unsupported composite mode");
+            return;
+        }
+        m_composite = static_cast<int>(requested);
         damage();
     });
 
@@ -175,6 +186,8 @@ void CHyprionGrade::draw(Render::CRenderContext& ctx, PHLMONITOR monitor) {
 
     const float alpha = layer->alpha()[Desktop::View::LS_ALPHA_FADE]->value();
     const auto  draw = [&](SHyprionGradeArea area, const CBox& areaBox, float thickness) {
+        const auto composite = m_composite >= 0 ? static_cast<SHyprionComposite>(m_composite)
+                                                 : (area == SHyprionGradeArea::OUTSET ? SHyprionComposite::OVER : SHyprionComposite::REPLACE);
         hyprionDrawGrade(ctx, monitor,
                          SHyprionGradeParams{
                              .box = areaBox,
@@ -184,6 +197,7 @@ void CHyprionGrade::draw(Render::CRenderContext& ctx, PHLMONITOR monitor) {
                              .roundingPower = m_roundingPower,
                              .style = m_style,
                              .alpha = alpha,
+                             .composite = composite,
                          });
     };
 
@@ -225,7 +239,7 @@ void CHyprionGradeProtocol::bindManager(wl_client* client, void* data, uint32_t 
     manager->setDestroy([this, manager](CHyprionGradeManagerV1*) { destroyManager(manager); });
     manager->setOnDestroy([this, manager](CHyprionGradeManagerV1*) { destroyManager(manager); });
     manager->setGetGrade([this](CHyprionGradeManagerV1* manager, uint32_t id, wl_resource* surface) { getGrade(manager, id, surface); });
-    manager->sendCapabilities(SUPPORTED_AREAS);
+    manager->sendCapabilities(SUPPORTED_AREAS, SUPPORTED_COMPOSITES);
 }
 
 void CHyprionGradeProtocol::destroyManager(CHyprionGradeManagerV1* manager) {

@@ -40,6 +40,7 @@ namespace {
         GLint snapshot = -1;
         GLint fullSnapshot = -1;
         GLint areaMode = -1;
+        GLint composite = -1;
         GLint windowBox = -1;
         GLint thickness = -1;
         GLint outset = -1;
@@ -646,6 +647,7 @@ void CHyprionDecoration::drawPass(Render::CRenderContext& ctx, float alpha, cons
     glUniform1i(uniforms.vertical, 1);
     setInt(uniforms.fullSnapshot, 0);
     setInt(uniforms.areaMode, outset ? 1 : 0);
+    setInt(uniforms.composite, outset ? 2 : 1);
     glUniform4f(uniforms.windowBox, static_cast<float>(left), static_cast<float>(bottom), static_cast<float>(width), static_cast<float>(height));
     setFloat(uniforms.thickness, static_cast<float>(thickness));
     setInt(uniforms.outset, outset ? 1 : 0);
@@ -789,6 +791,7 @@ bool initializeHyprionRenderer() {
         .snapshot = glGetUniformLocation(program, "uSnapshot"),
         .fullSnapshot = glGetUniformLocation(program, "uFullSnapshot"),
         .areaMode = glGetUniformLocation(program, "uAreaMode"),
+        .composite = glGetUniformLocation(program, "uComposite"),
         .windowBox = glGetUniformLocation(program, "uWindowBox"),
         .thickness = glGetUniformLocation(program, "uThickness"),
         .outset = glGetUniformLocation(program, "uOutset"),

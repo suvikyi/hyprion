@@ -24,6 +24,7 @@ namespace {
         GLint snapshot = -1;
         GLint fullSnapshot = -1;
         GLint areaMode = -1;
+        GLint composite = -1;
         GLint windowBox = -1;
         GLint thickness = -1;
         GLint outset = -1;
@@ -151,6 +152,7 @@ bool initializeHyprionGradeRenderer() {
         .snapshot = glGetUniformLocation(program, "uSnapshot"),
         .fullSnapshot = glGetUniformLocation(program, "uFullSnapshot"),
         .areaMode = glGetUniformLocation(program, "uAreaMode"),
+        .composite = glGetUniformLocation(program, "uComposite"),
         .windowBox = glGetUniformLocation(program, "uWindowBox"),
         .thickness = glGetUniformLocation(program, "uThickness"),
         .outset = glGetUniformLocation(program, "uOutset"),
@@ -293,6 +295,7 @@ bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHy
     glUniform1i(uniforms.vertical, 2);
     setInt(uniforms.fullSnapshot, 1);
     setInt(uniforms.areaMode, static_cast<GLint>(params.area));
+    setInt(uniforms.composite, static_cast<GLint>(params.composite));
     glUniform4f(uniforms.windowBox, static_cast<float>(left), static_cast<float>(bottom), static_cast<float>(width), static_cast<float>(height));
     setFloat(uniforms.thickness, static_cast<float>(thickness));
     setInt(uniforms.outset, params.area == SHyprionGradeArea::OUTSET ? 1 : 0);
@@ -328,7 +331,7 @@ bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHy
     glBindVertexArray(activeShader->getUniformLocation(SHADER_SHADER_VAO));
 
     const bool previousBlend = glIsEnabled(GL_BLEND);
-    g_pHyprOpenGL->blend(params.area == SHyprionGradeArea::OUTSET);
+    g_pHyprOpenGL->blend(params.composite == SHyprionComposite::OVER);
     borderRegion.forEachRect([&](const auto& rect) {
         g_pHyprOpenGL->scissor(ctx, &rect, renderData.transformDamage);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);

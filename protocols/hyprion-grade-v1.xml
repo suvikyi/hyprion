@@ -21,6 +21,7 @@
     <event name="capabilities">
       <description summary="supported area modes"/>
       <arg name="areas" type="uint" enum="hyprion_grade_v1.area"/>
+      <arg name="composites" type="uint" enum="hyprion_grade_v1.composite"/>
     </event>
 
     <request name="get_grade">
@@ -48,6 +49,11 @@
       <entry name="inset" value="1" summary="inside the box edge"/>
       <entry name="outset" value="2" summary="outside the box edge"/>
       <entry name="fill" value="4" summary="the whole box"/>
+    </enum>
+
+    <enum name="composite">
+      <entry name="replace" value="1" summary="interpolate the sampled pixel and the graded result"/>
+      <entry name="over" value="2" summary="premultiplied source-over the graded result"/>
     </enum>
 
     <enum name="error">
@@ -78,6 +84,11 @@
       <arg name="areas" type="uint" enum="area"/>
       <arg name="inset" type="int"/>
       <arg name="outset" type="int"/>
+    </request>
+
+    <request name="set_composite">
+      <description summary="select how the graded result combines with the framebuffer"/>
+      <arg name="composite" type="uint" enum="composite"/>
     </request>
 
     <request name="set_style">
