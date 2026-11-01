@@ -219,7 +219,7 @@ void destroyHyprionGradeMonitor(PHLMONITOR monitor) {
     snapshotCache.destroyMonitor(monitor);
 }
 
-bool hyprionCaptureGradeSnapshot(Render::CRenderContext& ctx, PHLMONITOR monitor, SP<Render::IFramebuffer>& snapshot) {
+bool hyprionCaptureGradeSnapshot(Render::CRenderContext& ctx, PHLMONITOR monitor, SP<Render::IFramebuffer>& snapshot, const CBox& bounds) {
     if (!g_pHyprRenderer || !g_pHyprOpenGL || !monitor)
         return false;
     auto& renderData = ctx.m_data;
@@ -238,6 +238,13 @@ bool hyprionCaptureGradeSnapshot(Render::CRenderContext& ctx, PHLMONITOR monitor
         height > std::numeric_limits<int>::max())
         return false;
 
+    const int left = std::max(0, static_cast<int>(std::floor(bounds.x)));
+    const int bottom = std::max(0, static_cast<int>(std::floor(bounds.y)));
+    const int right = std::min(static_cast<int>(width), static_cast<int>(std::ceil(bounds.x + bounds.width)));
+    const int top = std::min(static_cast<int>(height), static_cast<int>(std::ceil(bounds.y + bounds.height)));
+    if (right <= left || top <= bottom)
+        return false;
+
     snapshot = snapshotCache.ensureAtlas(monitor, framebuffer, description);
     if (!snapshot)
         return false;
@@ -246,7 +253,7 @@ bool hyprionCaptureGradeSnapshot(Render::CRenderContext& ctx, PHLMONITOR monitor
         return false;
     texture->bind();
     glBindFramebuffer(GL_READ_FRAMEBUFFER, glFramebuffer->getFBID());
-    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, left, bottom, left, bottom, right - left, top - bottom);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
     texture->unbind();
     framebuffer->bind();

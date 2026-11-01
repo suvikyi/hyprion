@@ -210,6 +210,11 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     }));
     listeners.emplace_back(Event::bus()->m_events.config.reloaded.listen(onConfigReloaded));
     listeners.emplace_back(Event::bus()->m_events.render.pre.listen([](PHLMONITOR monitor) {
+        if (!pluginActive || !monitor || !Hyprion::gradeProtocol)
+            return;
+        Hyprion::gradeProtocol->damageDirtyBands(monitor);
+    }));
+    listeners.emplace_back(Event::bus()->m_events.render.pre.listen([](PHLMONITOR monitor) {
         if (!pluginActive || !monitor || !monitor->m_blurFBDirty || monitor->m_blurFBShouldRender || !hyprionConfig().outsetBlur)
             return;
         // Native preRender skips opaque windows. Hyprion is an independent
@@ -234,7 +239,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     for (const auto& window : Desktop::windowState()->windows())
         attachDecoration(window, false);
 
-    return {"hyprion", "Hyprion visual effects for Hyprland", "Suvikyi", "0.3.1"};
+    return {"hyprion", "Hyprion visual effects for Hyprland", "Suvikyi", "0.3.2"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {

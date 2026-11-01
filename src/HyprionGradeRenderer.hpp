@@ -48,7 +48,7 @@ struct SHyprionGradeRequest {
     bool                  clipToDamageBox = false;
 };
 
-bool hyprionCaptureGradeSnapshot(Render::CRenderContext& ctx, PHLMONITOR monitor, SP<Render::IFramebuffer>& snapshot);
+bool hyprionCaptureGradeSnapshot(Render::CRenderContext& ctx, PHLMONITOR monitor, SP<Render::IFramebuffer>& snapshot, const CBox& bounds);
 bool initializeHyprionGradeRenderer();
 void destroyHyprionGradeRenderer();
 void destroyHyprionGradeMonitor(PHLMONITOR monitor);
