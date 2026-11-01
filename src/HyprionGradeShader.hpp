@@ -373,7 +373,7 @@ void main() {
 
     vec4 sampleColor;
     if (uFullSnapshot == 1) {
-        sampleColor = texelFetch(uSnapshot, ivec2(pixel.x - left, pixel.y - bottom), 0);
+        sampleColor = texelFetch(uSnapshot, pixel, 0);
     } else if (pixel.y < bottom + snapshotExtent) {
         sampleColor = texelFetch(uHorizontal, ivec2(pixel.x, pixel.y - bottom), 0);
     } else if (pixel.y >= top - snapshotExtent) {

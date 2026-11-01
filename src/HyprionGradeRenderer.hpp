@@ -26,4 +26,5 @@ struct SHyprionGradeParams {
 
 bool initializeHyprionGradeRenderer();
 void destroyHyprionGradeRenderer();
+void destroyHyprionGradeMonitor(PHLMONITOR monitor);
 bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHyprionGradeParams& params);

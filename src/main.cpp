@@ -285,7 +285,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     }));
     listeners.emplace_back(Event::bus()->m_events.window.active.listen(onFocusChanged));
     listeners.emplace_back(Event::bus()->m_events.window.urgent.listen(onUrgencyChanged));
-    listeners.emplace_back(Event::bus()->m_events.monitor.destroyMon.listen([](const PHLMONITOR& monitor) { destroyHyprionMonitor(monitor); }));
+    listeners.emplace_back(Event::bus()->m_events.monitor.destroyMon.listen([](const PHLMONITOR& monitor) {
+        destroyHyprionMonitor(monitor);
+        destroyHyprionGradeMonitor(monitor);
+    }));
     listeners.emplace_back(Event::bus()->m_events.config.reloaded.listen(onConfigReloaded));
     listeners.emplace_back(Event::bus()->m_events.render.pre.listen([](PHLMONITOR monitor) {
         if (!pluginActive || !monitor || !monitor->m_blurFBDirty || monitor->m_blurFBShouldRender || !hyprionConfig().outsetBlur)

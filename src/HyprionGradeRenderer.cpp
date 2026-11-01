@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <unordered_map>
 
 #include <hyprland/src/helpers/math/Math.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
@@ -50,6 +51,33 @@ namespace {
 
     SP<CShader> gradeShader;
     SUniforms   uniforms;
+
+    struct SAtlas {
+        SP<IFramebuffer> fb;
+        Vector2D         size;
+        DRMFormat        format = DRM_FORMAT_INVALID;
+        uint64_t         descriptionId = 0;
+    };
+
+    std::unordered_map<uint64_t, SAtlas> atlases;
+
+    SP<IFramebuffer> ensureAtlas(PHLMONITOR monitor, const SP<IFramebuffer>& source, const NColorManagement::PImageDescription& sourceDescription) {
+        auto& atlas = atlases[static_cast<uint64_t>(monitor->m_id)];
+        const auto descriptionId = sourceDescription->id();
+        if (atlas.fb && atlas.size == source->m_size && atlas.format == source->m_drmFormat && atlas.descriptionId == descriptionId)
+            return atlas.fb;
+
+        atlas.fb = g_pHyprRenderer->createFB(std::format("hyprion-grade-atlas-{}", monitor->m_id));
+        if (!atlas.fb || !atlas.fb->alloc(static_cast<int>(source->m_size.x), static_cast<int>(source->m_size.y), source->m_drmFormat)) {
+            atlas.fb.reset();
+            return nullptr;
+        }
+        atlas.fb->setImageDescription(sourceDescription);
+        atlas.size = source->m_size;
+        atlas.format = source->m_drmFormat;
+        atlas.descriptionId = descriptionId;
+        return atlas.fb;
+    }
 
     std::array<GLfloat, 9> matrixFor(const std::array<std::array<double, 3>, 3>& matrix) {
         return {
@@ -152,8 +180,14 @@ bool initializeHyprionGradeRenderer() {
 }
 
 void destroyHyprionGradeRenderer() {
+    atlases.clear();
     gradeShader.reset();
     uniforms = {};
+}
+
+void destroyHyprionGradeMonitor(PHLMONITOR monitor) {
+    if (monitor)
+        atlases.erase(static_cast<uint64_t>(monitor->m_id));
 }
 
 bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHyprionGradeParams& params) {
@@ -228,17 +262,16 @@ bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHy
     if (!glFramebuffer || glFramebuffer->getFBID() == 0)
         return false;
 
-    auto snapshot = g_pHyprRenderer->createFB("hyprion-grade-snapshot");
-    if (!snapshot || !snapshot->alloc(width, height, framebuffer->m_drmFormat))
+    const auto atlas = ensureAtlas(monitor, framebuffer, sourceDescription);
+    if (!atlas)
         return false;
-    snapshot->setImageDescription(sourceDescription);
-    const auto snapshotTexture = snapshot->getTexture();
+    const auto snapshotTexture = atlas->getTexture();
     if (!snapshotTexture)
         return false;
 
     snapshotTexture->bind();
     glBindFramebuffer(GL_READ_FRAMEBUFFER, glFramebuffer->getFBID());
-    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, left, bottom, width, height);
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, left, bottom, left, bottom, width, height);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
     snapshotTexture->unbind();
     framebuffer->bind();
@@ -246,10 +279,8 @@ bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHy
     const auto inputSettings = g_pHyprRenderer->getCMSettings(ctx, sourceDescription, defaultDescription);
     const auto outputSettings = g_pHyprRenderer->getCMSettings(ctx, defaultDescription, imageDescription);
     const float reference = inputSettings.dstRefLuminance;
-    if (!std::isfinite(reference) || reference <= 0.0F) {
-        snapshot->release();
+    if (!std::isfinite(reference) || reference <= 0.0F)
         return false;
-    }
 
     const auto toDefault = matrixFor(inputSettings.convertMatrix);
     const auto fromDefault = matrixFor(outputSettings.convertMatrix);
@@ -307,6 +338,5 @@ bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHy
 
     glBindVertexArray(0);
     snapshotTexture->unbind();
-    snapshot->release();
     return true;
 }
