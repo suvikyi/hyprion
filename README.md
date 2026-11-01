@@ -26,8 +26,9 @@ framebuffer it already uses for window effects.
 
 A grade is the primitive; inset/outset bands, glazes, shades, tints and washes
 are effects built from it. The first implementation advertises the inset,
-outset and fill areas on layer-shell surfaces. Blur is requested separately
-through `ext-background-effect-v1`; the grade samples the composited result. The client side lives in
+outset and fill areas, plus `replace` and `over` composite modes, on
+layer-shell surfaces. Blur is requested separately through
+`ext-background-effect-v1`; the grade samples the composited result. The client side lives in
 [irides](https://github.com/suvikyi/irides): its `Grade` component uses this path
 when the global and requested modes are present, and keeps its local
 ShaderEffect as the fallback for other compositors.
