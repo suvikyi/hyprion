@@ -1,10 +1,12 @@
 #include "HyprionDecoration.hpp"
 #include "HyprionConfig.hpp"
 #include "HyprionGradeShader.hpp"
+#include "HyprionGradeRenderer.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <format>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -292,6 +294,33 @@ namespace {
     }
 
 }
+
+    struct SAtlas {
+        SP<IFramebuffer> fb;
+        Vector2D         size;
+        DRMFormat        format = DRM_FORMAT_INVALID;
+        uint64_t         descriptionId = 0;
+    };
+
+    std::unordered_map<uint64_t, SAtlas> atlases;
+
+    SP<IFramebuffer> ensureAtlas(PHLMONITOR monitor, const SP<IFramebuffer>& source, const NColorManagement::PImageDescription& sourceDescription) {
+        auto& atlas = atlases[static_cast<uint64_t>(monitor->m_id)];
+        const auto descriptionId = sourceDescription->id();
+        if (atlas.fb && atlas.size == source->m_size && atlas.format == source->m_drmFormat && atlas.descriptionId == descriptionId)
+            return atlas.fb;
+
+        atlas.fb = g_pHyprRenderer->createFB(std::format("hyprion-grade-atlas-{}", monitor->m_id));
+        if (!atlas.fb || !atlas.fb->alloc(static_cast<int>(source->m_size.x), static_cast<int>(source->m_size.y), source->m_drmFormat)) {
+            atlas.fb.reset();
+            return nullptr;
+        }
+        atlas.fb->setImageDescription(sourceDescription);
+        atlas.size = source->m_size;
+        atlas.format = source->m_drmFormat;
+        atlas.descriptionId = descriptionId;
+        return atlas.fb;
+    }
 
 class CHyprionPassElement final : public IPassElement {
   public:
@@ -715,6 +744,159 @@ void CHyprionDecoration::drawPass(Render::CRenderContext& ctx, float alpha, cons
     snapshots.horizontal->getTexture()->unbind();
 }
 
+bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHyprionGradeParams& params) {
+    if (!g_pHyprRenderer || !g_pHyprOpenGL || !monitor)
+        return false;
+    if (!shader && !initializeHyprionRenderer())
+        return false;
+
+    auto& renderData = ctx.m_data;
+    if (renderData.damage.empty() || !renderData.currentFB)
+        return false;
+
+    const auto framebuffer = renderData.currentFB;
+    const auto imageDescription = framebuffer->imageDescription();
+    if (!imageDescription.valid() || imageDescription->value().icc.present)
+        return false;
+
+    const double modificationScale = renderData.renderModif.combinedScale();
+    const double requestedThickness = std::round(std::round(static_cast<double>(params.thickness) * monitor->m_scale) * modificationScale);
+    const double boundedThickness = std::clamp(requestedThickness, 0.0, 4096.0);
+    const int thickness = static_cast<int>(boundedThickness);
+    const double baseRounding = std::max(0.0, static_cast<double>(params.radius) * monitor->m_scale - 1.0) * modificationScale;
+    const float roundingPower = std::clamp(std::isfinite(params.roundingPower) ? params.roundingPower : 2.0F, 1.0F, 10.0F);
+    if (!std::isfinite(baseRounding) || baseRounding < 0.0)
+        return false;
+
+    CBox renderBox = params.box;
+    renderBox.scale(monitor->m_scale).round();
+    renderData.renderModif.applyToBox(renderBox);
+    if (renderBox.width <= 0.0 || renderBox.height <= 0.0 || !std::isfinite(renderBox.width) || !std::isfinite(renderBox.height))
+        return false;
+
+    double rounding = baseRounding;
+    double innerRounding = 0.0;
+    if (params.area == SHyprionGradeArea::OUTSET) {
+        const double correction = static_cast<double>(thickness) * (std::sqrt(2.0) - 1.0) * std::max(2.0 - roundingPower, 0.0);
+        rounding = baseRounding > 0.0 ? baseRounding + thickness - correction : 0.0;
+        innerRounding = baseRounding;
+    } else if (params.area == SHyprionGradeArea::INSET) {
+        innerRounding = std::max(baseRounding - thickness, 0.0);
+    }
+
+    const int roundingInt = static_cast<int>(std::clamp(rounding, 0.0, std::min(renderBox.width, renderBox.height) * 0.5));
+    const int innerRoundingInt = static_cast<int>(std::clamp(innerRounding, 0.0, std::min(renderBox.width, renderBox.height) * 0.5));
+
+    CBox targetBox = renderBox;
+    targetBox.transform(Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform)), monitor->m_transformedSize.x, monitor->m_transformedSize.y);
+    targetBox.round();
+
+    int left = 0, bottom = 0, width = 0, height = 0;
+    if (!safeRoundedInt(targetBox.x, left) || !safeRoundedInt(targetBox.y, bottom) || !safeRoundedInt(targetBox.width, width) ||
+        !safeRoundedInt(targetBox.height, height) || width <= 0 || height <= 0)
+        return false;
+
+    CRegion borderRegion = renderData.damage.copy().intersect(renderBox);
+    if (params.area != SHyprionGradeArea::FILL) {
+        const double borderExtent = static_cast<double>(thickness) + rounding;
+        if (renderBox.width > 2.0 * borderExtent && renderBox.height > 2.0 * borderExtent)
+            borderRegion.subtract(renderBox.copy().expand(-borderExtent));
+    }
+    if (borderRegion.empty())
+        return false;
+
+    const auto defaultDescription = NColorManagement::getDefaultImageDescription();
+    if (!defaultDescription.valid() || defaultDescription->value().icc.present)
+        return false;
+    const auto sourceDescription = framebuffer->imageDescription();
+    if (!sourceDescription.valid() || sourceDescription->value().icc.present)
+        return false;
+
+    auto* const glFramebuffer = dynamic_cast<CGLFramebuffer*>(framebuffer.get());
+    if (!glFramebuffer || glFramebuffer->getFBID() == 0)
+        return false;
+
+    const auto atlas = ensureAtlas(monitor, framebuffer, sourceDescription);
+    if (!atlas)
+        return false;
+    const auto snapshotTexture = atlas->getTexture();
+    if (!snapshotTexture)
+        return false;
+
+    snapshotTexture->bind();
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, glFramebuffer->getFBID());
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, left, bottom, left, bottom, width, height);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    snapshotTexture->unbind();
+    framebuffer->bind();
+
+    const auto inputSettings = g_pHyprRenderer->getCMSettings(ctx, sourceDescription, defaultDescription);
+    const auto outputSettings = g_pHyprRenderer->getCMSettings(ctx, defaultDescription, imageDescription);
+    const float reference = inputSettings.dstRefLuminance;
+    if (!std::isfinite(reference) || reference <= 0.0F)
+        return false;
+
+    const auto toDefault = matrixFor(inputSettings.convertMatrix);
+    const auto fromDefault = matrixFor(outputSettings.convertMatrix);
+    const auto projection = g_pHyprRenderer->projectBoxToTarget(ctx, renderBox);
+
+    auto activeShader = g_pHyprOpenGL->useShader(shader);
+    activeShader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, projection.getMatrix());
+    glUniform1i(uniforms.snapshot, 0);
+    glUniform1i(uniforms.horizontal, 1);
+    glUniform1i(uniforms.vertical, 2);
+    setInt(uniforms.fullSnapshot, 1);
+    setInt(uniforms.areaMode, static_cast<GLint>(params.area));
+    setInt(uniforms.composite, static_cast<GLint>(params.composite));
+    glUniform4f(uniforms.windowBox, static_cast<float>(left), static_cast<float>(bottom), static_cast<float>(width), static_cast<float>(height));
+    setFloat(uniforms.thickness, static_cast<float>(thickness));
+    setInt(uniforms.outset, params.area == SHyprionGradeArea::OUTSET ? 1 : 0);
+    setInt(uniforms.snapshotExtent, 0);
+    setFloat(uniforms.rounding, static_cast<float>(roundingInt));
+    setFloat(uniforms.innerRounding, static_cast<float>(innerRoundingInt));
+    setFloat(uniforms.roundingPower, roundingPower);
+    setFloat(uniforms.strength, params.style.strength);
+    setFloat(uniforms.opacity, std::clamp(params.style.opacity * params.alpha, 0.F, 1.F));
+    setFloat(uniforms.lightness, params.style.lightness);
+    setFloat(uniforms.saturation, params.style.saturation);
+    setFloat(uniforms.chroma, params.style.chroma);
+    setFloat(uniforms.hue, params.style.hue);
+    if (params.style.tintStrength > 0.F) {
+        const auto tintChroma = toOklabChroma(params.style.tintColor, inputSettings.convertMatrix);
+        glUniform2f(uniforms.tintChroma, tintChroma[0], tintChroma[1]);
+    } else
+        glUniform2f(uniforms.tintChroma, 0.F, 0.F);
+    setFloat(uniforms.tintStrength, params.style.tintStrength);
+    setFloat(uniforms.orbitAmount, 0.F);
+    setInt(uniforms.sourceTF, static_cast<GLint>(inputSettings.sourceTF));
+    setInt(uniforms.targetTF, static_cast<GLint>(outputSettings.targetTF));
+    if (uniforms.sourceRange >= 0)
+        glUniform2f(uniforms.sourceRange, inputSettings.srcTFRange.min, inputSettings.srcTFRange.max);
+    if (uniforms.targetRange >= 0)
+        glUniform2f(uniforms.targetRange, outputSettings.dstTFRange.min, outputSettings.dstTFRange.max);
+    setFloat(uniforms.defaultReference, reference);
+    setMat3(uniforms.toDefaultPrimaries, toDefault);
+    setMat3(uniforms.fromDefaultPrimaries, fromDefault);
+
+    glActiveTexture(GL_TEXTURE0);
+    snapshotTexture->bind();
+    glBindVertexArray(activeShader->getUniformLocation(SHADER_SHADER_VAO));
+
+    const bool previousBlend = glIsEnabled(GL_BLEND);
+    g_pHyprOpenGL->blend(params.composite == SHyprionComposite::OVER);
+    borderRegion.forEachRect([&](const auto& rect) {
+        g_pHyprOpenGL->scissor(ctx, &rect, renderData.transformDamage);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    });
+    g_pHyprOpenGL->disableScissor();
+    g_pHyprOpenGL->blend(previousBlend);
+
+    glBindVertexArray(0);
+    snapshotTexture->unbind();
+    return true;
+}
+
+
 eDecorationType CHyprionDecoration::getDecorationType() {
     return DECORATION_CUSTOM;
 }
@@ -835,6 +1017,7 @@ void destroyHyprionRenderer() {
     if (g_pHyprOpenGL && g_pHyprOpenGL->m_eglContext)
         g_pHyprOpenGL->makeEGLCurrent();
     monitorSnapshots.clear();
+    atlases.clear();
     shader.reset();
     uniforms = {};
 }
@@ -848,4 +1031,17 @@ void destroyHyprionMonitor(PHLMONITOR monitor) {
             g_pHyprOpenGL->makeEGLCurrent();
         monitorSnapshots.erase(it);
     }
+    atlases.erase(static_cast<uint64_t>(monitor->m_id));
+}
+
+bool initializeHyprionGradeRenderer() {
+    return initializeHyprionRenderer();
+}
+
+void destroyHyprionGradeRenderer() {
+    destroyHyprionRenderer();
+}
+
+void destroyHyprionGradeMonitor(PHLMONITOR monitor) {
+    destroyHyprionMonitor(monitor);
 }

@@ -243,8 +243,6 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     if (g_pHyprRenderer && g_pHyprRenderer->type() != Render::IHyprRenderer::RT_GL)
         throw std::runtime_error("hyprion requires Hyprland's OpenGL renderer");
-    if (g_pHyprRenderer && !initializeHyprionRenderer())
-        throw std::runtime_error("hyprion: failed to initialize the GPU sampling shader");
     if (g_pHyprRenderer && !initializeHyprionGradeRenderer())
         throw std::runtime_error("hyprion: failed to initialize the grade renderer");
 
@@ -286,7 +284,6 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     listeners.emplace_back(Event::bus()->m_events.window.active.listen(onFocusChanged));
     listeners.emplace_back(Event::bus()->m_events.window.urgent.listen(onUrgencyChanged));
     listeners.emplace_back(Event::bus()->m_events.monitor.destroyMon.listen([](const PHLMONITOR& monitor) {
-        destroyHyprionMonitor(monitor);
         destroyHyprionGradeMonitor(monitor);
     }));
     listeners.emplace_back(Event::bus()->m_events.config.reloaded.listen(onConfigReloaded));
@@ -344,7 +341,6 @@ APICALL EXPORT void PLUGIN_EXIT() {
     Hyprion::gradeProtocol.reset();
     if (g_pHyprRenderer)
         g_pHyprRenderer->context().m_pass.removeAllOfType("hyprion");
-    destroyHyprionRenderer();
     destroyHyprionGradeRenderer();
     pluginHandle = nullptr;
 }
