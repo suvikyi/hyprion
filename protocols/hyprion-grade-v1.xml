@@ -7,21 +7,21 @@
 
   <interface name="hyprion_grade_manager_v1" version="1">
     <description summary="create compositor-side colour grades for a surface">
-      Hyprion draws a sampled OKLab colour grade in the compositor, using the
-      same framebuffer source as its window effects. The client supplies only
-      an area and a style; no pixels cross the protocol.
+      Hyprion draws a sampled colour grade in the compositor, using the same
+      framebuffer source as its window effects. The client supplies only an
+      area and a style; no pixels cross the protocol.
 
       Grades are surface-local and clipped to the surface that owns them.
-      The capabilities event describes the area modes this compositor
+      The capabilities event describes the area and mode bits this compositor
       implements. Pixels are always sampled from the framebuffer after the
       surface has been drawn; blur is requested separately through
       ext-background-effect-v1.
     </description>
 
     <event name="capabilities">
-      <description summary="supported area modes"/>
+      <description summary="supported area and mode bits"/>
       <arg name="areas" type="uint" enum="hyprion_grade_v1.area"/>
-      <arg name="composites" type="uint" enum="hyprion_grade_v1.composite"/>
+      <arg name="modes" type="uint" enum="hyprion_grade_v1.mode"/>
     </event>
 
     <request name="get_grade">
@@ -39,9 +39,9 @@
   </interface>
 
   <interface name="hyprion_grade_v1" version="1">
-    <description summary="one sampled OKLab colour grade">
-      Coordinates are surface-local logical pixels. The box is the glazed
-      surface; the area selects inset, outset, both, or fill. The grade is
+    <description summary="one sampled colour grade">
+      Coordinates are surface-local logical pixels. The box is the graded
+      area; the area selects inset, outset, both, or fill. The grade is
       clipped to the owning surface and never paints outside it.
     </description>
 
@@ -51,15 +51,16 @@
       <entry name="fill" value="4" summary="the whole box"/>
     </enum>
 
-    <enum name="composite">
-      <entry name="replace" value="1" summary="interpolate the sampled pixel and the graded result"/>
-      <entry name="over" value="2" summary="premultiplied source-over the graded result"/>
+    <enum name="mode">
+      <entry name="in_place" value="1" summary="apply the grade to the sampled pixels in place; alpha is preserved"/>
+      <entry name="over" value="2" summary="premultiplied source-over of the graded sample with coverage opacity"/>
     </enum>
 
     <enum name="error">
       <entry name="invalid_geometry" value="0" summary="box is empty or invalid"/>
       <entry name="surface_destroyed" value="1" summary="the wl_surface is gone"/>
-      <entry name="unsupported" value="2" summary="area mode is not implemented"/>
+      <entry name="unsupported" value="2" summary="the requested area or mode is not implemented"/>
+      <entry name="invalid_gradient" value="3" summary="the gradient is empty or too large"/>
     </enum>
 
     <event name="supported">
@@ -86,20 +87,39 @@
       <arg name="outset" type="int"/>
     </request>
 
-    <request name="set_composite">
-      <description summary="select how the graded result combines with the framebuffer"/>
-      <arg name="composite" type="uint" enum="composite"/>
+    <request name="set_mode">
+      <description summary="select how the graded sample is written">
+        in_place applies the grade to the sampled pixels and preserves their
+        alpha. over composites the graded sample over the framebuffer using
+        premultiplied source-over with the band's coverage as source alpha.
+      </description>
+      <arg name="mode" type="uint" enum="mode"/>
     </request>
 
     <request name="set_style">
+      <description summary="set the grade transform">
+        The transform uses OKLab on SDR framebuffers and Jzazbz on HDR
+        framebuffers. lightness, saturation, chroma and hue are expressed in
+        that grade space. On HDR, lightness is normalised to the 80-nit SDR
+        reference white so the same numeric offset gives a comparable lift.
+        colorize_strength blends the sample's chroma toward the target gradient.
+        opacity is band coverage.
+      </description>
       <arg name="lightness" type="fixed"/>
       <arg name="saturation" type="fixed"/>
       <arg name="chroma" type="fixed"/>
       <arg name="hue" type="fixed"/>
-      <arg name="strength" type="fixed"/>
       <arg name="opacity" type="fixed"/>
-      <arg name="tint" type="uint"/>
-      <arg name="tint_strength" type="fixed"/>
+      <arg name="colorize_strength" type="fixed"/>
+    </request>
+
+    <request name="set_colorize_gradient">
+      <description summary="set the colorize target gradient">
+        Colors are sRGB ARGB values, uniformly spaced. angle is in degrees.
+        A single colour is a one-stop gradient. At most 10 stops are accepted.
+      </description>
+      <arg name="colors" type="array" summary="sRGB ARGB color stops"/>
+      <arg name="angle" type="fixed" summary="gradient angle in degrees"/>
     </request>
 
     <request name="destroy" type="destructor"/>

@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cstdint>
 #include "HyprionConfig.hpp"
 
+#include <array>
 #include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/render/Context.hpp>
 
@@ -11,26 +13,40 @@ enum class SHyprionGradeArea : uint8_t {
     FILL,
 };
 
-enum class SHyprionComposite : uint8_t {
-    REPLACE = 1,
-    OVER = 2,
+enum class SHyprionGradeMode : uint8_t {
+    IN_PLACE = 1,
+    OVER     = 2,
 };
 
-// One grade area in monitor-local logical coordinates. The renderer scales and
-// transforms it like the window-decoration path, but samples a full box
-// snapshot so fill and outset areas work as well as inset bands.
-struct SHyprionGradeParams {
-    CBox               box;
-    SHyprionGradeArea  area = SHyprionGradeArea::INSET;
-    float              thickness = 0.F;
-    float              radius = 0.F;
-    float              roundingPower = 2.F;
-    SHyprionStyle      style;
-    float              alpha = 1.F;
-    SHyprionComposite  composite = SHyprionComposite::REPLACE;
+enum class SHyprionGradeSource : uint8_t {
+    CURRENT_FRAMEBUFFER = 0,
+    BLUR_CACHE,
+    LIVE_BLUR,
+};
+
+// One grade draw in monitor-local coordinates. Geometry that depends on the
+// window or protocol surface is resolved by the caller; the renderer owns
+// snapshots, colour management, uniforms, and the actual draw.
+struct SHyprionGradeRequest {
+    CBox                  renderBox;
+    SHyprionGradeArea     area = SHyprionGradeArea::INSET;
+    SHyprionGradeMode     mode = SHyprionGradeMode::IN_PLACE;
+    SHyprionGradeSource   source = SHyprionGradeSource::CURRENT_FRAMEBUFFER;
+    int                   thickness = 0;
+    int                   rounding = 0;
+    int                   innerRounding = 0;
+    int                   snapshotExtent = 0;
+    float                 roundingPower = 2.F;
+    SHyprionStyle         style;
+    SHyprionOrbitStyle    orbit;
+    std::array<float, 65> cornerArcTable{};
+    float                 alpha = 1.F;
+    bool                  fullSnapshot = false;
+    bool                  snapshotOnly = false;
+    bool                  clipToDamageBox = false;
 };
 
 bool initializeHyprionGradeRenderer();
 void destroyHyprionGradeRenderer();
 void destroyHyprionGradeMonitor(PHLMONITOR monitor);
-bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHyprionGradeParams& params);
+bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHyprionGradeRequest& request);

@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.27)
 
 project(hyprion
     DESCRIPTION "Hyprion visual effects for Hyprland"
-    VERSION 0.2.1
+    VERSION 0.3.0
     LANGUAGES CXX
 )
 
@@ -36,7 +36,11 @@ add_custom_command(
 add_library(hyprion SHARED
     src/main.cpp
     src/HyprionConfig.cpp
+    src/HyprionColor.cpp
     src/HyprionDecoration.cpp
+    src/HyprionGradeRenderer.cpp
+    src/HyprionHooks.cpp
+    src/HyprionSnapshotCache.cpp
     src/HyprionGradeProtocol.cpp
     "${HYPRION_PROTOCOL_OUT}/hyprion-grade-v1.cpp"
 )

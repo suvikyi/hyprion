@@ -32,6 +32,9 @@ out vec4 fragColor;
 #define TF_ST428 12
 #define TF_HLG 13
 
+#define MODE_IN_PLACE 1
+#define MODE_OVER 2
+
 #define SRGB_POW 2.4
 #define SRGB_CUT 0.0031308
 #define SRGB_SCALE 12.92
@@ -59,12 +62,22 @@ out vec4 fragColor;
 #define HLG_B 0.28466892
 #define HLG_C 0.55991073
 
+// Jzazbz uses the HDR PQ variant from Safdar et al. (2017):
+// n = 2610 / 2^14, p = 1.7 * 2523 / 2^5.
+#define JZ_N 0.1593017578125
+#define JZ_P 134.034375
+#define JZ_C1 0.8359375
+#define JZ_C2 18.8515625
+#define JZ_C3 18.6875
+#define JZ_D -0.56
+#define JZ_D0 1.6295499532821566e-11
+
 uniform sampler2D uHorizontal;
 uniform sampler2D uVertical;
 uniform sampler2D uSnapshot;
 uniform int uFullSnapshot;
 uniform int uAreaMode;
-uniform int uComposite;
+uniform int uMode;
 uniform vec4 uWindowBox;
 uniform float uThickness;
 uniform bool uOutset;
@@ -72,34 +85,39 @@ uniform int uSnapshotExtent;
 uniform float uRounding;
 uniform float uInnerRounding;
 uniform float uRoundingPower;
-uniform float uStrength;
 uniform float uOpacity;
 uniform float uLightness;
 uniform float uSaturation;
 uniform float uChroma;
 uniform float uHue;
-uniform vec2 uTintChroma;
-uniform float uTintStrength;
+uniform vec4 uColorizeGradient[10];
+uniform int uColorizeGradientLength;
+uniform float uColorizeGradientAngle;
+uniform float uColorizeStrength;
 uniform float uOrbitPhase;
 uniform float uOrbitLength;
 uniform float uOrbitLightness;
 uniform float uOrbitSaturation;
 uniform float uOrbitChroma;
 uniform float uOrbitHue;
-uniform float uOrbitStrength;
 uniform float uOrbitOpacity;
 uniform float uOrbitAmount;
-uniform vec2 uOrbitTintChroma;
-uniform float uOrbitTintStrength;
+uniform vec4 uOrbitColorizeGradient[10];
+uniform int uOrbitColorizeGradientLength;
+uniform float uOrbitColorizeGradientAngle;
+uniform float uOrbitColorizeStrength;
 uniform float uCornerArcTable[65];
 
 uniform int uSourceTF;
 uniform int uTargetTF;
 uniform vec2 uSourceRange;
 uniform vec2 uTargetRange;
-uniform float uDefaultReference;
-uniform mat3 uToDefaultPrimaries;
-uniform mat3 uFromDefaultPrimaries;
+uniform mat3 uToWorkingPrimaries;
+uniform mat3 uFromWorkingPrimaries;
+uniform vec3 uTargetLuma;
+uniform float uTargetMaxNits;
+uniform float uReference;
+uniform int uHdr;
 
 vec3 tfInvLinPow(vec3 color, float gamma, float threshold, float scale, float alpha) {
     bvec3 low = lessThanEqual(color, vec3(threshold * scale));
@@ -115,7 +133,7 @@ vec3 tfLinPow(vec3 color, float gamma, float threshold, float scale, float alpha
 }
 vec3 tfInvPQ(vec3 color) {
     vec3 e = pow(clamp(color, vec3(0.0), vec3(1.0)), vec3(PQ_INV_M2));
-    return pow(max(e - PQ_C1, vec3(0.0)) / (PQ_C2 - PQ_C3 * e), vec3(PQ_INV_M1));
+    return pow(max(e - PQ_C1, vec3(0.0)) / max(PQ_C2 - PQ_C3 * e, vec3(0.000001)), vec3(PQ_INV_M1));
 }
 vec3 tfPQ(vec3 color) {
     vec3 e = pow(clamp(color, vec3(0.0), vec3(1.0)), vec3(PQ_M1));
@@ -198,24 +216,113 @@ vec3 oklabToLinear(vec3 lab) {
                -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
                -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s);
 }
-bool inGamut(vec3 rgb) {
-    return all(greaterThanEqual(rgb, vec3(0.0))) && all(lessThanEqual(rgb, vec3(1.0)));
+
+// Linear BT.709 RGB in nits -> Jzazbz. The matrix includes the Jzazbz
+// X'/Y' pre-processing and the BT.709 -> XYZ D65 transform, so the input is
+// the same linear working space used by the rest of the shader.
+vec3 linearToJzazbz(vec3 rgbNits) {
+    vec3 lms = vec3(
+        dot(vec3(0.358515604390249, 0.509182112313592, 0.104099482995855), rgbNits),
+        dot(vec3(0.220448033922503, 0.592272879605446, 0.159543683073875), rgbNits),
+        dot(vec3(0.079388342280360, 0.230332142660558, 0.663198985825040), rgbNits)
+    ) / 10000.0;
+    vec3 q = pow(clamp(lms, vec3(0.0), vec3(1.0)), vec3(JZ_N));
+    vec3 p = pow((vec3(JZ_C1) + JZ_C2 * q) / (vec3(1.0) + JZ_C3 * q), vec3(JZ_P));
+    float iz = 0.5 * (p.x + p.y);
+    float az = 3.524000 * p.x - 4.066708 * p.y + 0.542708 * p.z;
+    float bz = 0.199076 * p.x + 1.096799 * p.y - 1.295875 * p.z;
+    float jz = ((1.0 + JZ_D) * iz) / (1.0 + JZ_D * iz) - JZ_D0;
+    return vec3(jz, az, bz);
 }
-vec3 compressChroma(float lightness, vec2 chroma) {
-    vec3 candidate = oklabToLinear(vec3(lightness, chroma));
-    if (inGamut(candidate))
-        return candidate;
+vec3 jzazbzToLinear(vec3 lab) {
+    float iz = (lab.x + JZ_D0) / (1.0 + JZ_D - JZ_D * (lab.x + JZ_D0));
+    vec3 p;
+    p.x = iz + 0.1386050432715393 * lab.y + 0.0580473161561189 * lab.z;
+    p.y = iz - 0.1386050432715393 * lab.y - 0.0580473161561189 * lab.z;
+    p.z = iz - 0.0960192420263189 * lab.y - 0.8118918960560390 * lab.z;
+    vec3 e = pow(clamp(p, vec3(0.0), vec3(1.0)), vec3(1.0 / JZ_P));
+    vec3 lms = pow(max(e - JZ_C1, vec3(0.0)) / max(JZ_C2 - JZ_C3 * e, vec3(0.000001)), vec3(1.0 / JZ_N));
+    lms *= 10000.0;
+    return vec3(
+        dot(vec3(5.929591324798722, -5.224543357198974, 0.326109513013450), lms),
+        dot(vec3(-2.223887832959324, 3.822134206719980, -0.570404664326052), lms),
+        dot(vec3(0.062564064199942, -0.702040466016277, 1.666910321798117), lms)
+    );
+}
+
+vec3 gradeLab(vec3 lab, float lightness, float saturation, float chroma, float hue, vec2 colorizeChroma, float colorizeStrength) {
+    lab.x = clamp(lab.x + lightness, 0.0, 1.0);
+
+    float magnitude = length(lab.yz);
+    vec2 direction = magnitude > 0.000001 ? lab.yz / magnitude : vec2(0.0);
+    float angle = radians(hue);
+    float cosine = cos(angle);
+    float sine = sin(angle);
+    vec2 rotated = vec2(cosine * direction.x - sine * direction.y, sine * direction.x + cosine * direction.y);
+    float offset = chroma * smoothstep(0.0, 0.02, magnitude);
+    lab.yz = rotated * max(magnitude * saturation + offset, 0.0);
+
+    if (colorizeStrength > 0.0)
+        lab.yz = mix(lab.yz, colorizeChroma, clamp(colorizeStrength, 0.0, 1.0));
+
+    lab.x = clamp(lab.x, 0.0, 1.0);
+    return lab;
+}
+
+vec4 sampleGradient(vec2 coord, vec4 gradient[10], int length, float angle) {
+    if (length <= 0)
+        return vec4(0.0);
+    if (length == 1)
+        return gradient[0];
+
+    vec2 normalized = clamp(coord, vec2(0.0), vec2(1.0));
+    float finalAngle = angle;
+    if (angle > 4.71) {
+        normalized.y = 1.0 - normalized.y;
+        finalAngle = 6.28 - angle;
+    } else if (angle > 3.14) {
+        normalized = vec2(1.0) - normalized;
+        finalAngle = angle - 3.14;
+    } else if (angle > 1.57) {
+        normalized.x = 1.0 - normalized.x;
+        finalAngle = 3.14 - angle;
+    }
+
+    float progress = (normalized.y * sin(finalAngle) + normalized.x * (1.0 - sin(finalAngle))) * float(length - 1);
+    if (progress >= float(length - 1))
+        return gradient[length - 1];
+    int lower = int(floor(progress));
+    int upper = lower + 1;
+    return mix(gradient[lower], gradient[upper], progress - float(lower));
+}
+
+vec2 colorizeChromaFromGradient(vec4 gradientColor) {
+    if (uHdr != 0)
+        return linearToJzazbz(oklabToLinear(gradientColor.xyz) * uReference).yz;
+    return gradientColor.yz;
+}
+
+// Map a target-linear colour into the target gamut by desaturating toward its
+// luminance. HDR targets keep highlights above SDR white; only negative and
+// over-range components force a reduction.
+vec3 gamutMap(vec3 rgb, float maxNits) {
+    float luma = clamp(dot(rgb, uTargetLuma), 0.0, maxNits);
+    if (all(greaterThanEqual(rgb, vec3(0.0))) && all(lessThanEqual(rgb, vec3(maxNits))))
+        return rgb;
+
     float low = 0.0;
     float high = 1.0;
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < 12; ++i) {
         float middle = (low + high) * 0.5;
-        if (inGamut(oklabToLinear(vec3(lightness, chroma * middle))))
+        vec3 candidate = mix(vec3(luma), rgb, middle);
+        if (all(greaterThanEqual(candidate, vec3(0.0))) && all(lessThanEqual(candidate, vec3(maxNits))))
             low = middle;
         else
             high = middle;
     }
-    return clamp(oklabToLinear(vec3(lightness, chroma * low)), vec3(0.0), vec3(1.0));
+    return clamp(mix(vec3(luma), rgb, low), vec3(0.0), vec3(maxNits));
 }
+
 float roundedBoxCoverage(vec2 point, vec2 halfSize, float radius, float power) {
     vec2 correction = vec2(1.0) / (halfSize * 2.0);
     vec2 inner = abs(point) - halfSize + vec2(radius) + correction;
@@ -304,47 +411,6 @@ float orbitCoverage(vec2 point, vec2 halfSize, float rounding, float thickness, 
     float feather = min(max(1.0, perimeter * 0.01), segmentLength * 0.5);
     return smoothstep(0.0, feather, distance) * (1.0 - smoothstep(segmentLength - feather, segmentLength, distance)) * uOrbitAmount;
 }
-vec4 transformSample(vec4 sampleColor, float lightness, float saturation, float chroma, float hue, vec2 tintChroma, float tintStrength) {
-    if (sampleColor.a <= 0.001)
-        return sampleColor;
-    vec3 unpremultiplied = sampleColor.rgb / max(sampleColor.a, 0.001);
-    vec3 linearColor = decodeTF(unpremultiplied, uSourceTF);
-    if (uSourceTF != TF_LINEAR)
-        linearColor = linearColor * (uSourceRange.y - uSourceRange.x) + uSourceRange.x;
-    linearColor = uToDefaultPrimaries * linearColor;
-
-    float reference = max(uDefaultReference, 0.001);
-    vec3 normalized = max(linearColor / reference, vec3(0.0));
-    float peak = max(max(max(normalized.r, normalized.g), normalized.b), 1.0);
-    normalized = clamp(normalized / peak, vec3(0.0), vec3(1.0));
-    vec3 lab = linearToOklab(normalized);
-    lab.x = clamp(lab.x + lightness, 0.0, 1.0);
-    // Rotate hue in the OKLab (a, b) plane, then scale the chroma magnitude and
-    // offset it by `chroma`. The offset applies only to chroma the sample
-    // already has: a neutral sample has no hue, so it stays neutral instead of
-    // being pushed toward an arbitrary one. Gating the offset keeps that
-    // transition smooth for near-neutral samples.
-    float magnitude = length(lab.yz);
-    vec2 direction = magnitude > 0.000001 ? lab.yz / magnitude : vec2(0.0);
-    float angle = radians(hue);
-    float cosine = cos(angle);
-    float sine = sin(angle);
-    vec2 rotated = vec2(cosine * direction.x - sine * direction.y, sine * direction.x + cosine * direction.y);
-    float offset = chroma * smoothstep(0.0, 0.02, magnitude);
-    lab.yz = rotated * max(magnitude * saturation + offset, 0.0);
-    if (tintStrength > 0.0)
-        lab.yz = mix(lab.yz, tintChroma, tintStrength);
-    vec3 adjusted = compressChroma(lab.x, lab.yz) * (peak * reference);
-    adjusted = uFromDefaultPrimaries * adjusted;
-
-    if (uTargetTF == TF_LINEAR)
-        adjusted = encodeTF(adjusted, uTargetTF);
-    else {
-        adjusted = (adjusted - vec3(uTargetRange.x)) / (uTargetRange.y - uTargetRange.x);
-        adjusted = encodeTF(adjusted, uTargetTF);
-    }
-    return vec4(adjusted * sampleColor.a, sampleColor.a);
-}
 
 void main() {
     ivec2 pixel = ivec2(gl_FragCoord.xy);
@@ -364,9 +430,6 @@ void main() {
     if (coverage <= 0.0)
         discard;
 
-    // Opacity is how much of the border covers what is beneath it, resolved per
-    // fragment: the state's coverage outside the orbit, and the mix of the two
-    // where the orbit segment travels.
     float orbitMask = orbitCoverage(point, halfSize, uRounding, uThickness, power);
     float band = coverage * clamp(mix(uOpacity, uOrbitOpacity, orbitMask), 0.0, 1.0);
     if (band <= 0.0)
@@ -386,25 +449,55 @@ void main() {
     }
     if (sampleColor.a <= 0.001)
         discard;
-    vec4 color = sampleColor;
-    if (uStrength > 0.0 && (uLightness != 0.0 || uSaturation != 1.0 || uChroma != 0.0 || uHue != 0.0 || uTintStrength > 0.0)) {
-        vec4 transformed = transformSample(sampleColor, uLightness, uSaturation, uChroma, uHue, uTintChroma, uTintStrength);
-        // Strength is the transform amount; above 1 it extrapolates past the
-        // transformed colour and clips into the gamut when written out.
-        color = mix(sampleColor, transformed, uStrength);
+
+    vec3 encoded = sampleColor.rgb / max(sampleColor.a, 0.001);
+    vec3 sourceLinear = decodeTF(encoded, uSourceTF);
+    if (uSourceTF != TF_LINEAR)
+        sourceLinear = sourceLinear * (uSourceRange.y - uSourceRange.x) + uSourceRange.x;
+    sourceLinear = uToWorkingPrimaries * sourceLinear;
+
+    vec2 gradientCoord = clamp((gl_FragCoord.xy - uWindowBox.xy) / max(uWindowBox.zw, vec2(1.0)), vec2(0.0), vec2(1.0));
+    vec4 baseGradient = sampleGradient(gradientCoord, uColorizeGradient, uColorizeGradientLength, uColorizeGradientAngle);
+    vec2 colorizeChroma = colorizeChromaFromGradient(baseGradient);
+
+    vec3  baseLab = uHdr != 0 ? linearToJzazbz(sourceLinear) : linearToOklab(sourceLinear / uReference);
+    float lightnessScale = uHdr != 0 ? linearToJzazbz(vec3(uReference)).x : 1.0;
+    vec3  gradedLab = gradeLab(baseLab, uLightness * lightnessScale, uSaturation, uChroma, uHue, colorizeChroma, uColorizeStrength);
+
+    if (orbitMask > 0.0) {
+        vec4 orbitGradient = sampleGradient(gradientCoord, uOrbitColorizeGradient, uOrbitColorizeGradientLength, uOrbitColorizeGradientAngle);
+        vec2 orbitColorizeChroma = colorizeChromaFromGradient(orbitGradient);
+        vec3 orbitLab = gradeLab(baseLab, uOrbitLightness * lightnessScale, uOrbitSaturation, uOrbitChroma, uOrbitHue, orbitColorizeChroma,
+                                 uOrbitColorizeStrength);
+        gradedLab = mix(gradedLab, orbitLab, orbitMask);
     }
-    if (orbitMask > 0.0 && uOrbitStrength > 0.0) {
-        vec4 orbitTransformed = transformSample(sampleColor, uOrbitLightness, uOrbitSaturation, uOrbitChroma, uOrbitHue, uOrbitTintChroma, uOrbitTintStrength);
-        vec4 orbitColor = mix(sampleColor, orbitTransformed, uOrbitStrength);
-        color = mix(color, orbitColor, orbitMask);
-    }
-    if (uComposite == 2) {
-        // Premultiplied source-over: the destination stays live outside coverage.
-        fragColor = color * band;
+
+    vec3 gradedLinear = uHdr != 0 ? jzazbzToLinear(gradedLab) : oklabToLinear(gradedLab) * uReference;
+
+    float outAlpha = sampleColor.a;
+    vec3 outLinear;
+    if (uMode == MODE_OVER) {
+        float sourceAlpha = sampleColor.a * band;
+        vec3 sourcePremul = gradedLinear * sourceAlpha;
+        vec3 destinationPremul = sourceLinear * sampleColor.a;
+        outAlpha = sourceAlpha + sampleColor.a * (1.0 - sourceAlpha);
+        outLinear = (sourcePremul + destinationPremul * (1.0 - sourceAlpha)) / max(outAlpha, 0.001);
     } else {
-        // Replace/interpolate against the sampled pixel.
-        fragColor = mix(sampleColor, color, band);
+        outLinear = mix(sourceLinear, gradedLinear, band);
     }
+
+    vec3 targetLinear = uFromWorkingPrimaries * outLinear;
+    targetLinear = gamutMap(targetLinear, uTargetMaxNits);
+
+    vec3 targetEncoded;
+    if (uTargetTF == TF_LINEAR) {
+        targetEncoded = encodeTF(targetLinear, uTargetTF);
+    } else {
+        vec3 normalized = (targetLinear - vec3(uTargetRange.x)) / max(uTargetRange.y - uTargetRange.x, 0.001);
+        targetEncoded = encodeTF(normalized, uTargetTF);
+    }
+
+    fragColor = vec4(targetEncoded * outAlpha, outAlpha);
 }
 )glsl";
 }

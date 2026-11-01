@@ -46,7 +46,7 @@ class CHyprionGrade {
     SHyprionStyle m_style;
     uint32_t      m_areas = HYPRION_GRADE_V1_AREA_INSET;
     bool          m_enabled = true;
-    int           m_composite = -1; // auto: over for outset, replace otherwise
+    int           m_mode = -1; // auto: over for outset, in_place otherwise
     bool          m_supported = false;
     bool          m_supportSent = false;
 

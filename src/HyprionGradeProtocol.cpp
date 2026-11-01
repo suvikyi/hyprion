@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 
 #include <hyprland/src/Compositor.hpp>
+#include <hyprland/src/debug/log/Logger.hpp>
 #include <hyprland/src/desktop/view/LayerSurface.hpp>
 #include <hyprland/src/desktop/view/View.hpp>
 #include <hyprland/src/desktop/view/WLSurface.hpp>
@@ -14,23 +16,17 @@
 
 namespace {
     constexpr uint32_t SUPPORTED_AREAS = HYPRION_GRADE_V1_AREA_INSET | HYPRION_GRADE_V1_AREA_OUTSET | HYPRION_GRADE_V1_AREA_FILL;
-    constexpr uint32_t SUPPORTED_COMPOSITES = HYPRION_GRADE_V1_COMPOSITE_REPLACE | HYPRION_GRADE_V1_COMPOSITE_OVER;
+    constexpr uint32_t SUPPORTED_MODES = HYPRION_GRADE_V1_MODE_IN_PLACE | HYPRION_GRADE_V1_MODE_OVER;
 
-    SHyprionStyle styleFromWire(wl_fixed_t lightness, wl_fixed_t saturation, wl_fixed_t chroma, wl_fixed_t hue, wl_fixed_t strength, wl_fixed_t opacity,
-                                uint32_t tint, wl_fixed_t tintStrength) {
+    SHyprionStyle styleFromWire(wl_fixed_t lightness, wl_fixed_t saturation, wl_fixed_t chroma, wl_fixed_t hue, wl_fixed_t opacity,
+                                wl_fixed_t colorizeStrength) {
         SHyprionStyle style;
-        style.lightness = static_cast<float>(wl_fixed_to_double(lightness));
-        style.saturation = static_cast<float>(wl_fixed_to_double(saturation));
-        style.chroma = static_cast<float>(wl_fixed_to_double(chroma));
-        style.hue = static_cast<float>(wl_fixed_to_double(hue));
-        style.strength = static_cast<float>(wl_fixed_to_double(strength));
+        style.grade.lightness = static_cast<float>(wl_fixed_to_double(lightness));
+        style.grade.saturation = static_cast<float>(wl_fixed_to_double(saturation));
+        style.grade.chroma = static_cast<float>(wl_fixed_to_double(chroma));
+        style.grade.hue = static_cast<float>(wl_fixed_to_double(hue));
         style.opacity = static_cast<float>(wl_fixed_to_double(opacity));
-        style.tintColor = {
-            static_cast<float>((tint >> 16) & 0xFF) / 255.F,
-            static_cast<float>((tint >> 8) & 0xFF) / 255.F,
-            static_cast<float>(tint & 0xFF) / 255.F,
-        };
-        style.tintStrength = static_cast<float>(wl_fixed_to_double(tintStrength));
+        style.grade.colorize.strength = static_cast<float>(wl_fixed_to_double(colorizeStrength));
         return style;
     }
 }
@@ -93,20 +89,43 @@ void CHyprionGrade::setResource(SP<CHyprionGradeV1> resource) {
         damage();
     });
 
-    m_resource->setSetComposite([this](CHyprionGradeV1*, hyprionGradeV1Composite composite) {
-        const uint32_t requested = static_cast<uint32_t>(composite);
-        if ((requested & SUPPORTED_COMPOSITES) == 0) {
-            m_resource->error(HYPRION_GRADE_V1_ERROR_UNSUPPORTED, "unsupported composite mode");
+    m_resource->setSetMode([this](CHyprionGradeV1*, hyprionGradeV1Mode mode) {
+        const uint32_t requested = static_cast<uint32_t>(mode);
+        if ((requested & SUPPORTED_MODES) == 0) {
+            m_resource->error(HYPRION_GRADE_V1_ERROR_UNSUPPORTED, "unsupported grade mode");
             return;
         }
-        m_composite = static_cast<int>(requested);
+        m_mode = static_cast<int>(requested);
         damage();
     });
 
-    m_resource->setSetStyle([this](CHyprionGradeV1*, wl_fixed_t lightness, wl_fixed_t saturation, wl_fixed_t chroma, wl_fixed_t hue, wl_fixed_t strength,
-                                   wl_fixed_t opacity, uint32_t tint, wl_fixed_t tintStrength) {
-        m_style = styleFromWire(lightness, saturation, chroma, hue, strength, opacity, tint, tintStrength);
+    m_resource->setSetStyle([this](CHyprionGradeV1*, wl_fixed_t lightness, wl_fixed_t saturation, wl_fixed_t chroma, wl_fixed_t hue, wl_fixed_t opacity,
+                                   wl_fixed_t colorizeStrength) {
+        auto style = styleFromWire(lightness, saturation, chroma, hue, opacity, colorizeStrength);
+        style.grade.colorize.gradient = m_style.grade.colorize.gradient;
+        m_style = style;
         damage();
+    });
+
+    m_resource->setSetColorizeGradient([this](CHyprionGradeV1*, wl_array* colors, wl_fixed_t angle) {
+        if (!colors || colors->size == 0 || colors->size % sizeof(uint32_t) != 0 || colors->size / sizeof(uint32_t) > 10) {
+            m_resource->error(HYPRION_GRADE_V1_ERROR_INVALID_GRADIENT, "invalid colorize gradient");
+            return;
+        }
+        const auto count = colors->size / sizeof(uint32_t);
+        const auto* data = static_cast<const uint32_t*>(colors->data);
+        m_style.grade.colorize.gradient.colors.clear();
+        m_style.grade.colorize.gradient.colors.reserve(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            m_style.grade.colorize.gradient.colors.push_back({
+                static_cast<float>((data[i] >> 16) & 0xFF) / 255.F,
+                static_cast<float>((data[i] >> 8) & 0xFF) / 255.F,
+                static_cast<float>(data[i] & 0xFF) / 255.F,
+                1.F,
+            });
+        }
+        m_style.grade.colorize.gradient.angle = static_cast<float>(wl_fixed_to_double(angle) * std::numbers::pi / 180.0);
+                damage();
     });
 
     if (auto surface = m_surface.lock()) {
@@ -186,18 +205,56 @@ void CHyprionGrade::draw(Render::CRenderContext& ctx, PHLMONITOR monitor) {
 
     const float alpha = layer->alpha()[Desktop::View::LS_ALPHA_FADE]->value();
     const auto  draw = [&](SHyprionGradeArea area, const CBox& areaBox, float thickness) {
-        const auto composite = m_composite >= 0 ? static_cast<SHyprionComposite>(m_composite)
-                                                 : (area == SHyprionGradeArea::OUTSET ? SHyprionComposite::OVER : SHyprionComposite::REPLACE);
+        const auto mode = m_mode >= 0 ? static_cast<SHyprionGradeMode>(m_mode)
+                                     : (area == SHyprionGradeArea::OUTSET ? SHyprionGradeMode::OVER : SHyprionGradeMode::IN_PLACE);
+
+        auto&      renderData = ctx.m_data;
+        const auto modificationScale = renderData.renderModif.combinedScale();
+        const auto requestedThickness = std::round(std::round(static_cast<double>(thickness) * monitor->m_scale) * modificationScale);
+        const int  thicknessPx = static_cast<int>(std::clamp(requestedThickness, 0.0, 4096.0));
+        const auto baseRounding = std::max(0.0, static_cast<double>(m_radius) * monitor->m_scale - 1.0) * modificationScale;
+        const float roundingPower = std::clamp(std::isfinite(m_roundingPower) ? m_roundingPower : 2.0F, 1.0F, 10.0F);
+        if (!std::isfinite(baseRounding) || baseRounding < 0.0)
+            return;
+
+        CBox renderBox = areaBox;
+        renderBox.scale(monitor->m_scale).round();
+        renderData.renderModif.applyToBox(renderBox);
+        if (renderBox.width <= 0.0 || renderBox.height <= 0.0 || !std::isfinite(renderBox.width) || !std::isfinite(renderBox.height))
+            return;
+
+        double rounding = baseRounding;
+        double innerRounding = 0.0;
+        if (area == SHyprionGradeArea::OUTSET) {
+            const double correction = static_cast<double>(thicknessPx) * (std::sqrt(2.0) - 1.0) * std::max(2.0 - roundingPower, 0.0);
+            rounding = baseRounding > 0.0 ? baseRounding + thicknessPx - correction : 0.0;
+            innerRounding = baseRounding;
+        } else if (area == SHyprionGradeArea::INSET) {
+            innerRounding = std::max(baseRounding - thicknessPx, 0.0);
+        }
+
+        const double halfSize = std::min(renderBox.width, renderBox.height) * 0.5;
+        const int    roundingPx = static_cast<int>(std::clamp(rounding, 0.0, halfSize));
+        const int    innerRoundingPx = static_cast<int>(std::clamp(innerRounding, 0.0, halfSize));
+
         hyprionDrawGrade(ctx, monitor,
-                         SHyprionGradeParams{
-                             .box = areaBox,
+                         SHyprionGradeRequest{
+                             .renderBox = renderBox,
                              .area = area,
-                             .thickness = thickness,
-                             .radius = m_radius,
-                             .roundingPower = m_roundingPower,
+                             .mode = mode,
+                             .source = SHyprionGradeSource::CURRENT_FRAMEBUFFER,
+                             .thickness = thicknessPx,
+                             .rounding = roundingPx,
+                             .innerRounding = innerRoundingPx,
+                             .snapshotExtent = 0,
+                             .roundingPower = roundingPower,
                              .style = m_style,
+                             .orbit = {},
+                             .cornerArcTable = {},
                              .alpha = alpha,
-                             .composite = composite,
+                             .fullSnapshot = true,
+                             .snapshotOnly = false,
+                             .clipToDamageBox = false,
                          });
     };
 
@@ -239,7 +296,7 @@ void CHyprionGradeProtocol::bindManager(wl_client* client, void* data, uint32_t 
     manager->setDestroy([this, manager](CHyprionGradeManagerV1*) { destroyManager(manager); });
     manager->setOnDestroy([this, manager](CHyprionGradeManagerV1*) { destroyManager(manager); });
     manager->setGetGrade([this](CHyprionGradeManagerV1* manager, uint32_t id, wl_resource* surface) { getGrade(manager, id, surface); });
-    manager->sendCapabilities(SUPPORTED_AREAS, SUPPORTED_COMPOSITES);
+    manager->sendCapabilities(SUPPORTED_AREAS, SUPPORTED_MODES);
 }
 
 void CHyprionGradeProtocol::destroyManager(CHyprionGradeManagerV1* manager) {

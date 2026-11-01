@@ -8,10 +8,6 @@
 
 class CHyprionPassElement;
 
-bool  initializeHyprionRenderer();
-void  destroyHyprionRenderer();
-void  destroyHyprionMonitor(PHLMONITOR monitor);
-
 class CHyprionDecoration final : public IHyprWindowDecoration {
   public:
     explicit CHyprionDecoration(PHLWINDOW window);
@@ -28,10 +24,10 @@ class CHyprionDecoration final : public IHyprWindowDecoration {
     uint64_t                   getDecorationFlags() override;
     std::string                getDisplayName() override;
 
-    void stateChanged(bool focused, bool urgent, const SHyprionConfig& config, CHyprionAnimation::Time now);
-    void refreshAnimation(bool focused, bool urgent, const SHyprionConfig& config, CHyprionAnimation::Time now);
+    void stateChanged(bool active, bool urgent, const SHyprionConfig& config, CHyprionAnimation::Time now);
+    void refreshAnimation(bool active, bool urgent, const SHyprionConfig& config, CHyprionAnimation::Time now);
     bool animate(const SHyprionConfig& config, CHyprionAnimation::Time now);
-    void resetAnimation(bool focused, bool urgent, CHyprionAnimation::Time now);
+    void resetAnimation(bool active, bool urgent, CHyprionAnimation::Time now);
 
   private:
     CBox monitorLocalBox(PHLMONITOR monitor, const Render::SWindowRenderPresentation& presentation) const;

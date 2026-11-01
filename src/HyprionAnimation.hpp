@@ -1,6 +1,7 @@
 #pragma once
 
 #include "HyprionConfig.hpp"
+#include "HyprionColor.hpp"
 
 #include <hyprland/src/animation/AnimationManager.hpp>
 #include <hyprland/src/config/shared/animation/AnimationTree.hpp>
@@ -10,6 +11,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <string>
+#include <utility>
 
 // Hyprland times both progress values we animate, so we never invent a
 // duration: each is a 0 -> 1 value bound to the `border` animation leaf, the
@@ -19,11 +22,13 @@
 // false`, and get repainted through the animation manager's damage.
 class CHyprionProgress {
   public:
+    explicit CHyprionProgress(std::string leaf = "border") : m_leaf(std::move(leaf)) {}
+
     void bind(PHLWINDOW window) {
         if (window && m_progress && m_window.lock() == window) {
             // The animation tree is rebuilt on every config reload, so pick up
-            // the fresh `border` node even when the window has not changed.
-            m_progress->setConfig(borderAnimation());
+            // the fresh animation node even when the window has not changed.
+            m_progress->setConfig(animationConfig());
             return;
         }
 
@@ -32,7 +37,7 @@ class CHyprionProgress {
         if (!window)
             return;
 
-        Animation::mgr()->createAnimation(1.F, m_progress, borderAnimation(), window, AVARDAMAGE_ENTIRE);
+        Animation::mgr()->createAnimation(1.F, m_progress, animationConfig(), window, AVARDAMAGE_ENTIRE);
     }
 
     // Start a fresh 0 -> 1 leg. The value we come from stays on screen because
@@ -56,10 +61,11 @@ class CHyprionProgress {
     bool running() const { return m_progress && m_progress->isBeingAnimated(); }
 
   private:
-    static SP<Hyprutils::Animation::SAnimationPropertyConfig> borderAnimation() {
-        return Config::animationTree()->getAnimationPropertyConfig("border");
+    SP<Hyprutils::Animation::SAnimationPropertyConfig> animationConfig() const {
+        return Config::animationTree()->getAnimationPropertyConfig(m_leaf);
     }
 
+    std::string       m_leaf;
     PHLANIMVAR<float> m_progress;
     PHLWINDOWREF      m_window;
 };
@@ -67,76 +73,96 @@ class CHyprionProgress {
 // Each decoration owns its animation: losing focus must not cancel another window's fade.
 class CHyprionAnimation {
   public:
+    enum class EPulseKind : uint8_t {
+        NONE = 0,
+        ACTIVE,
+        INACTIVE,
+        URGENT,
+    };
+
     using Clock = std::chrono::steady_clock;
     using Time = Clock::time_point;
 
-    explicit CHyprionAnimation(bool focused = false, bool urgent = false) : m_focused(focused), m_urgent(urgent), m_orbitPhaseUpdated(Clock::now()) {}
+    explicit CHyprionAnimation(bool active = false, bool urgent = false) : m_active(active), m_urgent(urgent), m_orbitPhaseUpdated(Clock::now()) {}
 
     SHyprionFrameStyle style(const SHyprionBorderConfig& config, Time now) const {
-        const auto& state = m_focused ? config.active : config.inactive;
+        const auto& state = m_active ? config.active : config.inactive;
         const SHyprionStyle target = {
-            .lightness = state.lightness,
-            .saturation = state.saturation,
-            .chroma = state.chroma,
-            .hue = state.hue,
-            .strength = state.strength,
+            .grade = state.grade,
             .opacity = state.opacity,
-            .tintColor = state.tint.color,
-            .tintStrength = state.tint.strength,
         };
         // The leg's progress is 1 whenever it is settled, so an idle border is
         // exactly the state's style.
         const float transition = m_borderProgress.value();
         SHyprionStyle border = {
-            .lightness = std::lerp(m_from.lightness, target.lightness, transition),
-            .saturation = std::lerp(m_from.saturation, target.saturation, transition),
-            .chroma = std::lerp(m_from.chroma, target.chroma, transition),
-            .hue = std::lerp(m_from.hue, target.hue, transition),
-            .strength = std::lerp(m_from.strength, target.strength, transition),
+            .grade = {
+                .lightness = std::lerp(m_from.grade.lightness, target.grade.lightness, transition),
+                .saturation = std::lerp(m_from.grade.saturation, target.grade.saturation, transition),
+                .chroma = std::lerp(m_from.grade.chroma, target.grade.chroma, transition),
+                .hue = Hyprion::lerpHue(m_from.grade.hue, target.grade.hue, transition),
+                .colorize = {
+                    .gradient = Hyprion::lerpGradient(m_from.grade.colorize.gradient, target.grade.colorize.gradient, transition),
+                    .strength = std::lerp(m_from.grade.colorize.strength, target.grade.colorize.strength, transition),
+                },
+            },
             .opacity = std::lerp(m_from.opacity, target.opacity, transition),
-            .tintColor = {},
-            .tintStrength = std::lerp(m_from.tintStrength, target.tintStrength, transition),
         };
-        for (std::size_t i = 0; i < border.tintColor.size(); ++i)
-            border.tintColor[i] = std::lerp(m_from.tintColor[i], target.tintColor[i], transition);
 
-        // The focus pulse reaches its peak halfway through its configured duration.
-        if (m_pulseMs > 0.F) {
-            const float elapsed = elapsedMs(now);
-            const float pulse = 1.F - std::abs(2.F * progress(elapsed, m_pulseMs) - 1.F);
-            border.lightness = std::lerp(border.lightness, config.pulse.lightness, pulse);
-            border.saturation = std::lerp(border.saturation, config.pulse.saturation, pulse);
-            border.chroma = std::lerp(border.chroma, config.pulse.chroma, pulse);
-            border.hue = std::lerp(border.hue, config.pulse.hue, pulse);
-            border.strength = std::lerp(border.strength, config.pulse.strength, pulse);
-            border.opacity = std::lerp(border.opacity, config.pulse.opacity, pulse);
-            border.tintStrength = std::lerp(border.tintStrength, config.pulse.tint.strength, pulse);
-            for (std::size_t i = 0; i < border.tintColor.size(); ++i)
-                border.tintColor[i] = std::lerp(border.tintColor[i], config.pulse.tint.color[i], pulse);
+        // Pulse profiles are state-entry overlays: active/inactive/urgent.
+        if (const auto* pulseProfile = currentPulseProfile(config); pulseProfile && pulseProfile->enabled) {
+            const float duration = std::max(pulseProfile->timeMs, 0.F);
+            float       elapsed = pulseElapsedMs(now);
+            if (pulseProfile->intervalMs > 0.F && pulseProfile->intervalMs > duration)
+                elapsed = std::fmod(elapsed, pulseProfile->intervalMs);
+            const float pulse = duration > 0.F ? 1.F - std::abs(2.F * progress(elapsed, duration) - 1.F) : 0.F;
+            border.grade.lightness = std::lerp(border.grade.lightness, pulseProfile->grade.lightness, pulse);
+            border.grade.saturation = std::lerp(border.grade.saturation, pulseProfile->grade.saturation, pulse);
+            border.grade.chroma = std::lerp(border.grade.chroma, pulseProfile->grade.chroma, pulse);
+            border.grade.hue = Hyprion::lerpHue(border.grade.hue, pulseProfile->grade.hue, pulse);
+            border.opacity = std::lerp(border.opacity, pulseProfile->opacity, pulse);
+            border.grade.colorize.strength = std::lerp(border.grade.colorize.strength, pulseProfile->grade.colorize.strength, pulse);
+            border.grade.colorize.gradient = Hyprion::lerpGradient(border.grade.colorize.gradient, pulseProfile->grade.colorize.gradient, pulse);
         }
-        return {.border = border, .orbit = orbitStyle(now)};
+        const float angleOffset = m_angleProgress.value() * 6.2831853071795864769F;
+        border.grade.colorize.gradient.angle = std::fmod(border.grade.colorize.gradient.angle + angleOffset, 6.2831853071795864769F);
+        auto orbit = orbitStyle(now);
+        orbit.grade.colorize.gradient.angle = std::fmod(orbit.grade.colorize.gradient.angle + angleOffset, 6.2831853071795864769F);
+        return {.border = border, .orbit = orbit};
     }
 
     void bind(PHLWINDOW window) {
         m_borderProgress.bind(window);
         m_orbitProgress.bind(window);
+        m_angleProgress.bind(window);
     }
 
-    void stateChanged(bool focused, bool urgent, const SHyprionBorderConfig& config, Time now) {
-        if (focused != m_focused) {
+    void stateChanged(bool active, bool urgent, const SHyprionBorderConfig& config, Time now) {
+        const bool activeChanged = active != m_active;
+        const bool urgentChanged = urgent != m_urgent;
+        if (activeChanged) {
             m_from = style(config, now).border;
             m_started = now;
             m_borderProgress.restart();
-            m_pulseMs = focused && config.pulse.enabled ? config.pulse.timeMs : 0.F;
-            // The flare is a one-shot ignition: it fades in, laps exactly once,
-            // then fades out as the lap completes and hands back to the focused
-            // state's profile (or stays gone if that profile is disabled).
-            m_orbitFlareMs = focused && config.orbit.flare.enabled ? std::max(config.orbit.flare.timeMs, 1.F) : 0.F;
+            m_angleProgress.restart();
+            m_orbitFlareMs = active && config.orbit.flare.enabled ? std::max(config.orbit.flare.timeMs, 1.F) : 0.F;
             m_orbitFlareFadeInMs = m_orbitFlareMs > 0.F ? std::max(config.orbit.flare.fadeInMs, 0.F) : 0.F;
             m_orbitFlareFadeOutMs = m_orbitFlareMs > 0.F ? std::max(config.orbit.flare.fadeOutMs, 0.F) : 0.F;
         }
-        m_focused = focused;
+
+        m_active = active;
         m_urgent = urgent;
+
+        if (urgentChanged && urgent && config.pulse.urgent.enabled)
+            startPulse(EPulseKind::URGENT, config.pulse.urgent, now);
+        else if (activeChanged) {
+            const auto& profile = active ? config.pulse.active : config.pulse.inactive;
+            if (profile.enabled)
+                startPulse(active ? EPulseKind::ACTIVE : EPulseKind::INACTIVE, profile, now);
+            else if (m_pulseKind == EPulseKind::ACTIVE || m_pulseKind == EPulseKind::INACTIVE)
+                clearPulse();
+        } else if (urgentChanged && !urgent && m_pulseKind == EPulseKind::URGENT)
+            clearPulse();
+
         retargetOrbit(config, now);
         if (m_orbitFlareMs > 0.F) {
             // Ignition: the flare orbit is fully present the moment it appears.
@@ -144,27 +170,29 @@ class CHyprionAnimation {
         }
     }
 
-    void refresh(bool focused, bool urgent, const SHyprionBorderConfig& config, Time now) {
+    void refresh(bool active, bool urgent, const SHyprionBorderConfig& config, Time now) {
         advanceOrbitPhase(now);
-        m_focused = focused;
+        m_active = active;
         m_urgent = urgent;
-        m_pulseMs = 0.F;
+        clearPulse();
         m_orbitFlareMs = 0.F;
         m_orbitFlareFadeInMs = 0.F;
         m_orbitFlareFadeOutMs = 0.F;
         m_borderProgress.settle();
+        m_angleProgress.settle();
         retargetOrbit(config, now);
     }
 
-    void reset(bool focused, bool urgent, Time now) {
+    void reset(bool active, bool urgent, Time now) {
         advanceOrbitPhase(now);
-        m_focused = focused;
+        m_active = active;
         m_urgent = urgent;
-        m_pulseMs = 0.F;
+        clearPulse();
         m_orbitFlareMs = 0.F;
         m_orbitFlareFadeInMs = 0.F;
         m_orbitFlareFadeOutMs = 0.F;
         m_borderProgress.settle();
+        m_angleProgress.settle();
         m_orbitFrom = m_orbitTo;
         m_orbitTo.amount = 0.F;
         m_orbitTargetEnabled = false;
@@ -177,10 +205,9 @@ class CHyprionAnimation {
     // transition value and damages the window for it, so our tick only has to
     // cover the ring's own box.
     bool advance(const SHyprionBorderConfig& config, Time now) {
-        const bool wasRunning = m_borderProgress.running() || m_pulseMs > 0.F || m_orbitFlareMs > 0.F || m_orbitTo.amount > 0.F;
+        const bool wasRunning = m_borderProgress.running() || m_pulseKind != EPulseKind::NONE || m_orbitFlareMs > 0.F || m_orbitTo.amount > 0.F;
         advanceOrbitPhase(now);
-        if (m_pulseMs > 0.F && elapsedMs(now) >= m_pulseMs)
-            m_pulseMs = 0.F;
+        updatePulse(config, now);
         if (m_orbitFlareMs > 0.F && elapsedMs(now) >= m_orbitFlareMs) {
             // The flare's fade-out is already complete (amount 0), so hand back
             // from exactly that faded style.
@@ -207,16 +234,14 @@ class CHyprionAnimation {
         const float transition = m_orbitProgress.value();
         result.timeMs = std::lerp(m_orbitFrom.timeMs, m_orbitTo.timeMs, transition);
         result.length = std::lerp(m_orbitFrom.length, m_orbitTo.length, transition);
-        result.lightness = std::lerp(m_orbitFrom.lightness, m_orbitTo.lightness, transition);
-        result.saturation = std::lerp(m_orbitFrom.saturation, m_orbitTo.saturation, transition);
-        result.chroma = std::lerp(m_orbitFrom.chroma, m_orbitTo.chroma, transition);
-        result.hue = std::lerp(m_orbitFrom.hue, m_orbitTo.hue, transition);
-        result.strength = std::lerp(m_orbitFrom.strength, m_orbitTo.strength, transition);
+        result.grade.lightness = std::lerp(m_orbitFrom.grade.lightness, m_orbitTo.grade.lightness, transition);
+        result.grade.saturation = std::lerp(m_orbitFrom.grade.saturation, m_orbitTo.grade.saturation, transition);
+        result.grade.chroma = std::lerp(m_orbitFrom.grade.chroma, m_orbitTo.grade.chroma, transition);
+        result.grade.hue = Hyprion::lerpHue(m_orbitFrom.grade.hue, m_orbitTo.grade.hue, transition);
         result.opacity = std::lerp(m_orbitFrom.opacity, m_orbitTo.opacity, transition);
         result.amount = std::lerp(m_orbitFrom.amount, m_orbitTo.amount, transition);
-        result.tintStrength = std::lerp(m_orbitFrom.tintStrength, m_orbitTo.tintStrength, transition);
-        for (std::size_t i = 0; i < result.tintColor.size(); ++i)
-            result.tintColor[i] = std::lerp(m_orbitFrom.tintColor[i], m_orbitTo.tintColor[i], transition);
+        result.grade.colorize.strength = std::lerp(m_orbitFrom.grade.colorize.strength, m_orbitTo.grade.colorize.strength, transition);
+        result.grade.colorize.gradient = Hyprion::lerpGradient(m_orbitFrom.grade.colorize.gradient, m_orbitTo.grade.colorize.gradient, transition);
         // The flare fades in and out inside its single ignition lap: the orbit is
         // fully transparent at the start and again exactly as the lap completes,
         // instead of popping in or lingering afterwards.
@@ -281,16 +306,72 @@ class CHyprionAnimation {
     }
 
     static bool sameOrbit(const SHyprionOrbitStyle& lhs, const SHyprionOrbitStyle& rhs) {
-        return lhs.timeMs == rhs.timeMs && lhs.length == rhs.length && lhs.lightness == rhs.lightness && lhs.saturation == rhs.saturation &&
-            lhs.chroma == rhs.chroma && lhs.hue == rhs.hue &&
-            lhs.strength == rhs.strength && lhs.opacity == rhs.opacity && lhs.amount == rhs.amount && lhs.tintColor == rhs.tintColor && lhs.tintStrength == rhs.tintStrength;
+        return lhs.timeMs == rhs.timeMs && lhs.length == rhs.length && lhs.grade.lightness == rhs.grade.lightness && lhs.grade.saturation == rhs.grade.saturation &&
+            lhs.grade.chroma == rhs.grade.chroma && lhs.grade.hue == rhs.grade.hue &&
+            lhs.opacity == rhs.opacity && lhs.amount == rhs.amount && lhs.grade.colorize.gradient == rhs.grade.colorize.gradient && lhs.grade.colorize.strength == rhs.grade.colorize.strength;
+    }
+
+    const SHyprionPulseProfile* pulseProfile(const SHyprionBorderConfig& config, EPulseKind kind) const {
+        switch (kind) {
+            case EPulseKind::ACTIVE: return &config.pulse.active;
+            case EPulseKind::INACTIVE: return &config.pulse.inactive;
+            case EPulseKind::URGENT: return &config.pulse.urgent;
+            default: return nullptr;
+        }
+    }
+
+    const SHyprionPulseProfile* currentPulseProfile(const SHyprionBorderConfig& config) const {
+        return pulseProfile(config, m_pulseKind);
+    }
+
+    void startPulse(EPulseKind kind, const SHyprionPulseProfile& profile, Time now) {
+        m_pulseKind = kind;
+        m_pulseStarted = now;
+        m_pulseDurationMs = std::max(profile.timeMs, 0.F);
+        m_pulseIntervalMs = std::max(profile.intervalMs, 0.F);
+        if (m_pulseIntervalMs > 0.F && m_pulseIntervalMs < m_pulseDurationMs)
+            m_pulseIntervalMs = m_pulseDurationMs;
+    }
+
+    void clearPulse() {
+        m_pulseKind = EPulseKind::NONE;
+        m_pulseDurationMs = 0.F;
+        m_pulseIntervalMs = 0.F;
+    }
+
+    float pulseElapsedMs(Time now) const {
+        return std::chrono::duration<float, std::milli>(now - m_pulseStarted).count();
+    }
+
+    void updatePulse(const SHyprionBorderConfig& config, Time now) {
+        if (m_pulseKind == EPulseKind::NONE)
+            return;
+        const auto* profile = currentPulseProfile(config);
+        if (!profile || !profile->enabled) {
+            clearPulse();
+            return;
+        }
+        if ((m_pulseKind == EPulseKind::ACTIVE && !m_active) || (m_pulseKind == EPulseKind::INACTIVE && m_active) ||
+            (m_pulseKind == EPulseKind::URGENT && !m_urgent)) {
+            clearPulse();
+            return;
+        }
+
+        const float elapsed = pulseElapsedMs(now);
+        if (m_pulseIntervalMs > 0.F) {
+            if (elapsed >= m_pulseIntervalMs) {
+                const auto periods = std::floor(elapsed / m_pulseIntervalMs);
+                m_pulseStarted += std::chrono::duration_cast<Time::duration>(std::chrono::duration<float, std::milli>(periods * m_pulseIntervalMs));
+            }
+        } else if (elapsed >= m_pulseDurationMs)
+            clearPulse();
     }
 
     void retargetOrbit(const SHyprionBorderConfig& config, Time now, const SHyprionOrbitStyle* fromOverride = nullptr) {
         advanceOrbitPhase(now);
         const SHyprionOrbitProfile* profile = m_orbitFlareMs > 0.F ? &config.orbit.flare
             : m_urgent                                            ? &config.orbit.urgent
-            : m_focused                                           ? &config.orbit.active
+            : m_active                                           ? &config.orbit.active
                                                                   : &config.orbit.inactive;
         const bool targetEnabled = profile && profile->enabled;
         if (targetEnabled) {
@@ -302,16 +383,10 @@ class CHyprionAnimation {
             target = {
                 .timeMs = profile->timeMs,
                 .length = profile->length,
-                .lightness = profile->lightness,
-                .saturation = profile->saturation,
-                .chroma = profile->chroma,
-                .hue = profile->hue,
-                .strength = profile->strength,
+                .grade = profile->grade,
                 .opacity = profile->opacity,
                 .phase = static_cast<float>(m_orbitPhase),
                 .amount = 1.F,
-                .tintColor = profile->tint.color,
-                .tintStrength = profile->tint.strength,
             };
         } else {
             target.amount = 0.F;
@@ -336,11 +411,14 @@ class CHyprionAnimation {
             m_orbitProgress.restart();
     }
 
-    bool m_focused = false;
-    bool m_urgent = false;
-    SHyprionStyle m_from;
-    Time m_started;
-    float m_pulseMs = 0.F;
+    bool             m_active = false;
+    bool             m_urgent = false;
+    SHyprionStyle    m_from;
+    Time             m_started;
+    EPulseKind       m_pulseKind = EPulseKind::NONE;
+    Time             m_pulseStarted;
+    float            m_pulseDurationMs = 0.F;
+    float            m_pulseIntervalMs = 0.F;
     // Non-zero while a focus flare is running; the value is the flare's lap time,
     // which is also how long the ignition lasts (exactly one lap).
     float m_orbitFlareMs = 0.F;
@@ -348,8 +426,8 @@ class CHyprionAnimation {
     float m_orbitFlareFadeInMs = 0.F;
     float m_orbitFlareFadeOutMs = 0.F;
 
-    SHyprionOrbitStyle m_orbitFrom = {.strength = 0.F};
-    SHyprionOrbitStyle m_orbitTo = {.strength = 0.F};
+    SHyprionOrbitStyle m_orbitFrom = {};
+    SHyprionOrbitStyle m_orbitTo = {};
     Time m_orbitPhaseUpdated;
     float m_orbitLapTimeMs = 12000.F;
     double m_orbitPhase = 0.0;
@@ -361,4 +439,5 @@ class CHyprionAnimation {
     // Focus transition and orbit crossfade, both timed by Hyprland.
     CHyprionProgress m_borderProgress;
     CHyprionProgress m_orbitProgress;
+    CHyprionProgress m_angleProgress{"borderangle"};
 };

@@ -3,6 +3,7 @@
 #include "HyprionConfig.hpp"
 #include "HyprionDecoration.hpp"
 #include "HyprionGradeProtocol.hpp"
+#include "HyprionHooks.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -10,7 +11,6 @@
 #include <string>
 #include <stdexcept>
 #include <vector>
-#include <unordered_map>
 
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/state/FocusState.hpp>
@@ -24,7 +24,6 @@
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/render/decorations/CHyprDropShadowDecoration.hpp>
-#include <hyprland/src/plugins/HookSystem.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 
 namespace {
@@ -37,64 +36,8 @@ namespace {
     std::vector<CHyprSignalListener>   listeners;
     SP<CEventLoopTimer>               animationTimer;
     PHLWINDOWREF                      lastFocusedWindow;
-    CFunctionHook* shadowHook = nullptr;
-    CFunctionHook* shadowDrawHook = nullptr;
-    CFunctionHook* gradeLayerHook = nullptr;
-    std::unordered_map<CHyprDropShadowDecoration*, PHLWINDOWREF> shadowWindows;
-
-    SShadowRenderData shadowRenderData(CHyprDropShadowDecoration* shadow, Render::CRenderContext& ctx, PHLMONITOR monitor, const float& alpha,
-                                       const Render::SWindowRenderPresentation& presentation) {
-        using Original = SShadowRenderData (*)(CHyprDropShadowDecoration*, Render::CRenderContext&, PHLMONITOR, const float&, const Render::SWindowRenderPresentation&);
-        auto data = reinterpret_cast<Original>(shadowHook->m_original)(shadow, ctx, monitor, alpha, presentation);
-        if (!data.valid || data.rounding <= 0.F)
-            return data;
-        const auto config = hyprionConfig();
-        if (!config.enabled || !config.outset.enabled)
-            return data;
-        const auto owner = shadowWindows.find(shadow);
-        if (owner == shadowWindows.end())
-            return data;
-        const auto window = owner->second.lock();
-        if (!window || !validMapped(window))
-            return data;
-        // The native shadow box already includes our reserved outset, but its
-        // radius only includes the native border. Expand both by the same amount.
-        const float correction = (std::sqrt(2.F) - 1.F) * std::max(2.F - data.roundingPower, 0.F);
-        data.rounding += config.outset.size * (1.F - correction);
-        return data;
-    }
-
     bool windowUrgent(const PHLWINDOW& window) {
         return window && (window->m_hints & Desktop::View::WINDOW_HINT_URGENT) != Desktop::View::WINDOW_HINT_NONE;
-    }
-
-    CHyprionDecoration* hyprionDecoration(const PHLWINDOW& window) {
-        if (!window || !validMapped(window))
-            return nullptr;
-        for (const auto& decoration : window->presentation().decorations()) {
-            if (auto* hyprion = dynamic_cast<CHyprionDecoration*>(decoration.get()))
-                return hyprion;
-        }
-        return nullptr;
-    }
-
-    void renderLayerHook(Render::IHyprRenderer* self, Render::CRenderContext& ctx, PHLLS layer, PHLMONITOR monitor, const Time::steady_tp& time, bool popups,
-                         bool lockscreen, bool workspaceScene) {
-        using Original = void (*)(Render::IHyprRenderer*, Render::CRenderContext&, PHLLS, PHLMONITOR, const Time::steady_tp&, bool, bool, bool);
-        reinterpret_cast<Original>(gradeLayerHook->m_original)(self, ctx, layer, monitor, time, popups, lockscreen, workspaceScene);
-        if (!pluginActive || popups || !layer || !monitor || !Hyprion::gradeProtocol)
-            return;
-        Hyprion::gradeProtocol->queue(ctx, layer, monitor);
-    }
-
-    void drawShadow(CHyprDropShadowDecoration* shadow, Render::CRenderContext& ctx, PHLMONITOR monitor, const float& alpha, const Render::SWindowRenderPresentation& presentation) {
-        const auto owner = shadowWindows.find(shadow);
-        if (owner != shadowWindows.end()) {
-            if (auto* decoration = hyprionDecoration(owner->second.lock()))
-                decoration->drawOutset(ctx, monitor, alpha, presentation);
-        }
-        using Original = void (*)(CHyprDropShadowDecoration*, Render::CRenderContext&, PHLMONITOR, const float&, const Render::SWindowRenderPresentation&);
-        reinterpret_cast<Original>(shadowDrawHook->m_original)(shadow, ctx, monitor, alpha, presentation);
     }
 
     void onAnimationTimer(SP<CEventLoopTimer> timer, void*) {
@@ -106,7 +49,7 @@ namespace {
         const auto focused = Desktop::focusState()->window();
         bool running = false;
         for (const auto& window : Desktop::windowState()->windows()) {
-            auto* decoration = hyprionDecoration(window);
+            auto* decoration = Hyprion::Hooks::findDecoration(window);
             if (!decoration)
                 continue;
             if (!config.enabled || (!config.inset.enabled && !config.outset.enabled))
@@ -127,7 +70,7 @@ namespace {
         const auto now = CHyprionAnimation::Clock::now();
         const bool effectsEnabled = config.enabled && (config.inset.enabled || config.outset.enabled);
         bool running = false;
-        if (auto* decoration = hyprionDecoration(previous)) {
+        if (auto* decoration = Hyprion::Hooks::findDecoration(previous)) {
             if (effectsEnabled) {
                 decoration->stateChanged(false, windowUrgent(previous), config, now);
                 running = decoration->animate(config, now) || running;
@@ -135,7 +78,7 @@ namespace {
                 decoration->resetAnimation(false, windowUrgent(previous), now);
             }
         }
-        if (auto* decoration = hyprionDecoration(focusedWindow)) {
+        if (auto* decoration = Hyprion::Hooks::findDecoration(focusedWindow)) {
             if (effectsEnabled) {
                 decoration->stateChanged(true, windowUrgent(focusedWindow), config, now);
                 running = decoration->animate(config, now) || running;
@@ -148,7 +91,7 @@ namespace {
     }
 
     void onUrgencyChanged(const PHLWINDOW& urgentWindow) {
-        auto* decoration = hyprionDecoration(urgentWindow);
+        auto* decoration = Hyprion::Hooks::findDecoration(urgentWindow);
         if (!decoration)
             return;
 
@@ -166,15 +109,15 @@ namespace {
     }
 
     void attachDecoration(const PHLWINDOW& window, bool animateFocus) {
-        if (!window || !validMapped(window) || hyprionDecoration(window))
+        if (!window || !validMapped(window) || Hyprion::Hooks::findDecoration(window))
             return;
 
         for (const auto& deco : window->presentation().decorations()) {
             if (auto* shadow = dynamic_cast<CHyprDropShadowDecoration*>(deco.get()))
-                shadowWindows.insert_or_assign(shadow, window);
+                Hyprion::Hooks::registerShadowWindow(shadow, window);
         }
         HyprlandAPI::addWindowDecoration(pluginHandle, window, makeShared<CHyprionDecoration>(window));
-        auto* decoration = hyprionDecoration(window);
+        auto* decoration = Hyprion::Hooks::findDecoration(window);
         if (!decoration)
             return;
 
@@ -206,7 +149,7 @@ namespace {
         lastFocusedWindow = focused;
         bool running = false;
         for (const auto& window : Desktop::windowState()->windows()) {
-            if (auto* decoration = hyprionDecoration(window)) {
+            if (auto* decoration = Hyprion::Hooks::findDecoration(window)) {
                 decoration->updateWindow(window);
                 if (!config.enabled || (!config.inset.enabled && !config.outset.enabled))
                     decoration->resetAnimation(window == focused, windowUrgent(window), now);
@@ -246,29 +189,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     if (g_pHyprRenderer && !initializeHyprionGradeRenderer())
         throw std::runtime_error("hyprion: failed to initialize the grade renderer");
 
-    auto shadowMethods = HyprlandAPI::findFunctionsByName(handle, "getRenderData");
-    std::erase_if(shadowMethods, [](const auto& match) { return !match.demangled.starts_with("CHyprDropShadowDecoration::getRenderData("); });
-    if (shadowMethods.size() != 1)
-        throw std::runtime_error("hyprion: cannot locate native shadow rendering");
-    shadowHook = HyprlandAPI::createFunctionHook(handle, shadowMethods.front().address, reinterpret_cast<void*>(&shadowRenderData));
-    if (!shadowHook || !shadowHook->hook())
-        throw std::runtime_error("hyprion: cannot hook native shadow rendering");
-
-    auto shadowDrawMethods = HyprlandAPI::findFunctionsByName(handle, "draw");
-    std::erase_if(shadowDrawMethods, [](const auto& match) { return !match.demangled.starts_with("CHyprDropShadowDecoration::draw("); });
-    if (shadowDrawMethods.size() != 1)
-        throw std::runtime_error("hyprion: cannot locate native shadow pass scheduling");
-    shadowDrawHook = HyprlandAPI::createFunctionHook(handle, shadowDrawMethods.front().address, reinterpret_cast<void*>(&drawShadow));
-    if (!shadowDrawHook || !shadowDrawHook->hook())
-        throw std::runtime_error("hyprion: cannot hook native shadow pass scheduling");
-
-    auto layerMethods = HyprlandAPI::findFunctionsByName(handle, "renderLayer");
-    std::erase_if(layerMethods, [](const auto& match) { return !match.demangled.starts_with("Render::IHyprRenderer::renderLayer("); });
-    if (layerMethods.size() != 1)
-        throw std::runtime_error("hyprion: cannot locate layer rendering");
-    gradeLayerHook = HyprlandAPI::createFunctionHook(handle, layerMethods.front().address, reinterpret_cast<void*>(&renderLayerHook));
-    if (!gradeLayerHook || !gradeLayerHook->hook())
-        throw std::runtime_error("hyprion: cannot hook layer rendering");
+    if (!Hyprion::Hooks::install(handle))
+        throw std::runtime_error("hyprion: failed to install Hyprland hooks");
 
     Hyprion::gradeProtocol = makeUnique<CHyprionGradeProtocol>();
 
@@ -279,7 +201,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     listeners.emplace_back(Event::bus()->m_events.window.open.listen([](const PHLWINDOW& window) { attachDecoration(window, true); }));
     listeners.emplace_back(Event::bus()->m_events.window.close.listen([](const PHLWINDOW& window) {
-        std::erase_if(shadowWindows, [&](const auto& entry) { return entry.second.expired() || entry.second.lock() == window; });
+        Hyprion::Hooks::unregisterWindow(window);
     }));
     listeners.emplace_back(Event::bus()->m_events.window.active.listen(onFocusChanged));
     listeners.emplace_back(Event::bus()->m_events.window.urgent.listen(onUrgencyChanged));
@@ -305,17 +227,19 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     }));
 
     pluginActive = true;
+    Hyprion::Hooks::setActive(true);
     lastFocusedWindow = Desktop::focusState()->window();
     HyprlandAPI::reloadConfig();
 
     for (const auto& window : Desktop::windowState()->windows())
         attachDecoration(window, false);
 
-    return {"hyprion", "Hyprion visual effects for Hyprland", "Suvikyi", "0.2.1"};
+    return {"hyprion", "Hyprion visual effects for Hyprland", "Suvikyi", "0.3.0"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
     pluginActive = false;
+    Hyprion::Hooks::setActive(false);
     if (animationTimer) {
         animationTimer->updateTimeout(std::nullopt);
         if (g_pEventLoopManager)
@@ -324,19 +248,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
     }
 
     listeners.clear();
-    if (shadowDrawHook) {
-        HyprlandAPI::removeFunctionHook(pluginHandle, shadowDrawHook);
-        shadowDrawHook = nullptr;
-    }
-    if (shadowHook) {
-        HyprlandAPI::removeFunctionHook(pluginHandle, shadowHook);
-        shadowHook = nullptr;
-    }
-    if (gradeLayerHook) {
-        HyprlandAPI::removeFunctionHook(pluginHandle, gradeLayerHook);
-        gradeLayerHook = nullptr;
-    }
-    shadowWindows.clear();
+    Hyprion::Hooks::uninstall();
     lastFocusedWindow = PHLWINDOWREF{};
     Hyprion::gradeProtocol.reset();
     if (g_pHyprRenderer)
