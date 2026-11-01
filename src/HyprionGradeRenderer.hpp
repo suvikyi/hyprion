@@ -5,9 +5,9 @@
 #include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/render/Context.hpp>
 
-// A single inset glaze ring, in monitor-local logical coordinates. The
+// A single inset grade band, in monitor-local logical coordinates. The
 // renderer scales and transforms it like the window-decoration path.
-struct SHyprionGlazeParams {
+struct SHyprionGradeParams {
     CBox          box;
     float         thickness     = 0.F;
     float         radius        = 0.F;
@@ -16,4 +16,4 @@ struct SHyprionGlazeParams {
     float         alpha = 1.F;
 };
 
-bool hyprionDrawInsetGlaze(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHyprionGlazeParams& params);
+bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHyprionGradeParams& params);

@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="hyprion_grade_v1">
+  <copyright>
+    Copyright © 2026 Suvikyi
+    SPDX-License-Identifier: BSD-3-Clause
+  </copyright>
+
+  <interface name="hyprion_grade_manager_v1" version="1">
+    <description summary="create compositor-side colour grades for a surface">
+      Hyprion draws a sampled OKLab colour grade in the compositor, using the
+      same framebuffer source as its window effects. The client supplies only
+      an area and a style; no pixels cross the protocol.
+
+      Grades are surface-local and clipped to the surface that owns them.
+      The capabilities event describes the area and source modes this
+      compositor implements.
+    </description>
+
+    <event name="capabilities">
+      <description summary="supported area and source modes"/>
+      <arg name="areas" type="uint" enum="hyprion_grade_v1.area"/>
+      <arg name="sources" type="uint" enum="hyprion_grade_v1.source"/>
+    </event>
+
+    <request name="get_grade">
+      <description summary="create a grade object for a surface">
+        Multiple grade objects may be attached to the same surface. They are
+        rendered in creation order.
+      </description>
+      <arg name="id" type="new_id" interface="hyprion_grade_v1"/>
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager"/>
+    </request>
+  </interface>
+
+  <interface name="hyprion_grade_v1" version="1">
+    <description summary="one sampled OKLab colour grade">
+      Coordinates are surface-local logical pixels. The box is the glazed
+      surface; the area selects inset, outset, both, or fill. The grade is
+      clipped to the owning surface and never paints outside it.
+    </description>
+
+    <enum name="area" bitfield="true">
+      <entry name="inset" value="1" summary="inside the box edge"/>
+      <entry name="outset" value="2" summary="outside the box edge"/>
+      <entry name="fill" value="4" summary="the whole box"/>
+    </enum>
+
+    <enum name="source" bitfield="true">
+      <entry name="fill" value="1" summary="the framebuffer after the surface is drawn"/>
+      <entry name="backdrop" value="2" summary="the framebuffer before the surface is drawn"/>
+      <entry name="blur" value="4" summary="Hyprland's blur cache"/>
+    </enum>
+
+    <enum name="error">
+      <entry name="invalid_geometry" value="0" summary="box is empty or invalid"/>
+      <entry name="surface_destroyed" value="1" summary="the wl_surface is gone"/>
+      <entry name="unsupported" value="2" summary="area or source mode is not implemented"/>
+    </enum>
+
+    <event name="supported">
+      <description summary="whether this surface can carry a compositor grade"/>
+      <arg name="supported" type="uint" summary="1 when the surface role is supported"/>
+    </event>
+
+    <request name="set_enabled">
+      <arg name="enabled" type="uint"/>
+    </request>
+
+    <request name="set_box">
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+      <arg name="radius" type="fixed"/>
+      <arg name="rounding_power" type="fixed"/>
+    </request>
+
+    <request name="set_area">
+      <arg name="areas" type="uint" enum="area"/>
+      <arg name="inset" type="int"/>
+      <arg name="outset" type="int"/>
+    </request>
+
+    <request name="set_source">
+      <arg name="sources" type="uint" enum="source"/>
+    </request>
+
+    <request name="set_style">
+      <arg name="lightness" type="fixed"/>
+      <arg name="saturation" type="fixed"/>
+      <arg name="chroma" type="fixed"/>
+      <arg name="hue" type="fixed"/>
+      <arg name="strength" type="fixed"/>
+      <arg name="opacity" type="fixed"/>
+      <arg name="tint" type="uint"/>
+      <arg name="tint_strength" type="fixed"/>
+    </request>
+
+    <request name="destroy" type="destructor"/>
+  </interface>
+</protocol>

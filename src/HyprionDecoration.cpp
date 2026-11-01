@@ -1,6 +1,6 @@
 #include "HyprionDecoration.hpp"
 #include "HyprionConfig.hpp"
-#include "HyprionShader.hpp"
+#include "HyprionGradeRenderer.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1102,7 +1102,7 @@ void CHyprionDecoration::drawPass(Render::CRenderContext& ctx, float alpha, cons
     snapshots.horizontal->getTexture()->unbind();
 }
 
-bool hyprionDrawInsetGlaze(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHyprionGlazeParams& params) {
+bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHyprionGradeParams& params) {
     if (!g_pHyprRenderer || !g_pHyprOpenGL || !monitor || !std::isfinite(params.thickness) || params.thickness <= 0.F)
         return false;
     if (!shader && !initializeHyprionRenderer())

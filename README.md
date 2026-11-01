@@ -8,18 +8,27 @@ The inset overlays the window surface; the outset occupies reserved space outsid
 
 Requires **Hyprland 0.57.0**, matching development headers, and the OpenGL renderer.
 
-## Compositor glaze protocol
+Hyprion is pronounced like **Hyperion**.
 
-Hyprion owns a plugin-local `hyprion_glaze_manager_v1` global. A Wayland client
-attaches a glaze object to a `wl_surface`, supplies a surface-local box, band
-widths, corner geometry and the same OKLab style parameters as the border, and
-Hyprion draws the ring while that surface is rendered. The client receives no
+Hyprion's protocols are Hyprland-specific. They depend on Hyprland's renderer
+and are not intended for other compositors; there are no current plans to
+provide equivalents elsewhere. Applications that use them must implement their
+own fallback for other compositors.
+
+## Grade primitive protocol
+
+Hyprion owns a plugin-local `hyprion_grade_manager_v1` global. A Wayland client
+attaches a grade object to a `wl_surface`, supplies a surface-local box, an
+area mode, a source mode and the same OKLab style parameters as the border, and
+Hyprion draws the grade while that surface is rendered. The client receives no
 pixels and needs no screencopy permission; the compositor samples the exact
-framebuffer it already uses for window borders.
+framebuffer it already uses for window effects.
 
-The first implementation covers the inset band on layer-shell surfaces. The
-client side lives in [irides](https://github.com/suvikyi/irides): its `Glaze`
-component uses this path when the global is present and keeps its local
+A grade is the primitive; inset/outset bands, glazes, shades, tints and washes
+are effects built from it. The first implementation advertises the inset area
+and fill source on layer-shell surfaces. The client side lives in
+[irides](https://github.com/suvikyi/irides): its `Grade` component uses this path
+when the global and requested modes are present, and keeps its local
 ShaderEffect as the fallback for other compositors.
 
 ## Install
