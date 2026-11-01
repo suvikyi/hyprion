@@ -296,4 +296,5 @@ struct SHyprionConfig {
 };
 
 bool         registerHyprionConfig(void* handle);
+void         invalidateHyprionConfig();
 SHyprionConfig hyprionConfig();

@@ -6,6 +6,8 @@
 #include <hyprland/src/helpers/signal/Signal.hpp>
 #include <hyprland/src/protocols/WaylandProtocol.hpp>
 
+#include <unordered_map>
+
 #include "hyprion-grade-v1.hpp"
 
 class CHyprionGradeManagerV1;
@@ -19,7 +21,6 @@ class CHyprionGrade {
 
     bool good() const;
     void draw(Render::CRenderContext& ctx, PHLMONITOR monitor);
-    bool matches(const PHLLS& layer) const;
     CBox boxFor(PHLMONITOR monitor) const;
 
   private:
@@ -31,6 +32,7 @@ class CHyprionGrade {
 
     SP<CHyprionGradeV1>    m_resource;
     WP<CWLSurfaceResource> m_surface;
+    CWLSurfaceResource*    m_surfacePtr = nullptr;
 
     int   m_x = 0;
     int   m_y = 0;
@@ -43,7 +45,6 @@ class CHyprionGrade {
 
     SHyprionStyle m_style;
     uint32_t      m_areas = HYPRION_GRADE_V1_AREA_INSET;
-    uint32_t      m_sources = HYPRION_GRADE_V1_SOURCE_FILL;
     bool          m_enabled = true;
     bool          m_supported = false;
     bool          m_supportSent = false;
@@ -69,6 +70,7 @@ class CHyprionGradeProtocol : public IWaylandProtocol {
 
     std::vector<UP<CHyprionGradeManagerV1>> m_managers;
     std::vector<UP<CHyprionGrade>>          m_grades;
+    std::unordered_map<CWLSurfaceResource*, std::vector<CHyprionGrade*>> m_bySurface;
 
     friend class CHyprionGrade;
 };

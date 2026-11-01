@@ -12,14 +12,15 @@
       an area and a style; no pixels cross the protocol.
 
       Grades are surface-local and clipped to the surface that owns them.
-      The capabilities event describes the area and source modes this
-      compositor implements.
+      The capabilities event describes the area modes this compositor
+      implements. Pixels are always sampled from the framebuffer after the
+      surface has been drawn; blur is requested separately through
+      ext-background-effect-v1.
     </description>
 
     <event name="capabilities">
-      <description summary="supported area and source modes"/>
+      <description summary="supported area modes"/>
       <arg name="areas" type="uint" enum="hyprion_grade_v1.area"/>
-      <arg name="sources" type="uint" enum="hyprion_grade_v1.source"/>
     </event>
 
     <request name="get_grade">
@@ -49,16 +50,10 @@
       <entry name="fill" value="4" summary="the whole box"/>
     </enum>
 
-    <enum name="source" bitfield="true">
-      <entry name="fill" value="1" summary="the framebuffer after the surface is drawn"/>
-      <entry name="backdrop" value="2" summary="the framebuffer before the surface is drawn"/>
-      <entry name="blur" value="4" summary="Hyprland's blur cache"/>
-    </enum>
-
     <enum name="error">
       <entry name="invalid_geometry" value="0" summary="box is empty or invalid"/>
       <entry name="surface_destroyed" value="1" summary="the wl_surface is gone"/>
-      <entry name="unsupported" value="2" summary="area or source mode is not implemented"/>
+      <entry name="unsupported" value="2" summary="area mode is not implemented"/>
     </enum>
 
     <event name="supported">
@@ -83,10 +78,6 @@
       <arg name="areas" type="uint" enum="area"/>
       <arg name="inset" type="int"/>
       <arg name="outset" type="int"/>
-    </request>
-
-    <request name="set_source">
-      <arg name="sources" type="uint" enum="source"/>
     </request>
 
     <request name="set_style">

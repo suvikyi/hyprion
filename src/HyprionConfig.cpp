@@ -393,6 +393,9 @@ namespace {
                                               defaults.orbit.flare.fadeOutMs, 0.F, 120000.F));
     }
 
+    SHyprionConfig cachedConfig;
+    bool            cachedConfigValid = false;
+
     SHyprionBorderConfig readBorder(const SBorderValues& values, const SHyprionBorderConfig& defaults) {
         SHyprionBorderConfig config = defaults;
         if (!values.enabled || !values.size || !values.activeLightness || !values.activeSaturation || !values.activeChroma || !values.activeHue || !values.activeStrength ||
@@ -451,6 +454,7 @@ namespace {
 }
 
 bool registerHyprionConfig(HANDLE handle) {
+    cachedConfigValid = false;
     enabled = makeShared<CBoolValue>("plugin:hyprion:enabled", "Enable Hyprion visual effects", true);
     outsetBlur = makeShared<CBoolValue>("plugin:hyprion:border.outset.blur", "Sample Hyprland's blur for this window (requires blur)", true);
     return HyprlandAPI::addConfigValueV2(handle, enabled) && HyprlandAPI::addConfigValueV2(handle, outsetBlur) &&
@@ -458,14 +462,22 @@ bool registerHyprionConfig(HANDLE handle) {
         registerBorder(handle, outsetValues, "plugin:hyprion:border.outset", HYPRION_OUTSET_DEFAULTS);
 }
 
+void invalidateHyprionConfig() {
+    cachedConfigValid = false;
+}
+
 SHyprionConfig hyprionConfig() {
-    SHyprionConfig config;
-    if (enabled) config.enabled = enabled->value();
-    config.inset = readBorder(insetValues, HYPRION_INSET_DEFAULTS);
-    config.outset = readBorder(outsetValues, HYPRION_OUTSET_DEFAULTS);
-    static const auto NATIVE_BLUR = CConfigValue<Config::INTEGER>("decoration:blur:enabled");
-    // Which blur source the outset samples is Hyprland's decision, not ours
-    // (see CHyprionDecoration::drawPass), so only the global blur toggle matters here.
-    config.outsetBlur = config.enabled && config.outset.enabled && outsetBlur && outsetBlur->value() && *NATIVE_BLUR;
-    return config;
+    if (!cachedConfigValid) {
+        cachedConfig = {};
+        if (enabled)
+            cachedConfig.enabled = enabled->value();
+        cachedConfig.inset = readBorder(insetValues, HYPRION_INSET_DEFAULTS);
+        cachedConfig.outset = readBorder(outsetValues, HYPRION_OUTSET_DEFAULTS);
+        static const auto NATIVE_BLUR = CConfigValue<Config::INTEGER>("decoration:blur:enabled");
+        // Which blur source the outset samples is Hyprland's decision, not ours
+        // (see CHyprionDecoration::drawPass), so only the global blur toggle matters here.
+        cachedConfig.outsetBlur = cachedConfig.enabled && cachedConfig.outset.enabled && outsetBlur && outsetBlur->value() && *NATIVE_BLUR;
+        cachedConfigValid = true;
+    }
+    return cachedConfig;
 }

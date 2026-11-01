@@ -197,6 +197,7 @@ namespace {
     }
 
     void onConfigReloaded() {
+        invalidateHyprionConfig();
         if (animationTimer)
             animationTimer->updateTimeout(std::nullopt);
         const auto config = hyprionConfig();
@@ -244,6 +245,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         throw std::runtime_error("hyprion requires Hyprland's OpenGL renderer");
     if (g_pHyprRenderer && !initializeHyprionRenderer())
         throw std::runtime_error("hyprion: failed to initialize the GPU sampling shader");
+    if (g_pHyprRenderer && !initializeHyprionGradeRenderer())
+        throw std::runtime_error("hyprion: failed to initialize the grade renderer");
 
     auto shadowMethods = HyprlandAPI::findFunctionsByName(handle, "getRenderData");
     std::erase_if(shadowMethods, [](const auto& match) { return !match.demangled.starts_with("CHyprDropShadowDecoration::getRenderData("); });
@@ -339,6 +342,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
     if (g_pHyprRenderer)
         g_pHyprRenderer->context().m_pass.removeAllOfType("hyprion");
     destroyHyprionRenderer();
+    destroyHyprionGradeRenderer();
     pluginHandle = nullptr;
 }
 

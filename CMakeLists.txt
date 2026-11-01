@@ -38,6 +38,7 @@ add_library(hyprion SHARED
     src/HyprionConfig.cpp
     src/HyprionDecoration.cpp
     src/HyprionGradeProtocol.cpp
+    src/HyprionGradeRenderer.cpp
     "${HYPRION_PROTOCOL_OUT}/hyprion-grade-v1.cpp"
 )
 
