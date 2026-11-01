@@ -2,6 +2,7 @@
 
 #include "HyprionConfig.hpp"
 #include "HyprionDecoration.hpp"
+#include "HyprionGlaze.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -13,7 +14,9 @@
 
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/state/FocusState.hpp>
+#include <hyprland/src/desktop/view/LayerSurface.hpp>
 #include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
+#include <hyprland/src/helpers/time/Time.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
@@ -36,6 +39,7 @@ namespace {
     PHLWINDOWREF                      lastFocusedWindow;
     CFunctionHook* shadowHook = nullptr;
     CFunctionHook* shadowDrawHook = nullptr;
+    CFunctionHook* glazeLayerHook = nullptr;
     std::unordered_map<CHyprDropShadowDecoration*, PHLWINDOWREF> shadowWindows;
 
     SShadowRenderData shadowRenderData(CHyprDropShadowDecoration* shadow, Render::CRenderContext& ctx, PHLMONITOR monitor, const float& alpha,
@@ -72,6 +76,15 @@ namespace {
                 return hyprion;
         }
         return nullptr;
+    }
+
+    void renderLayerHook(Render::IHyprRenderer* self, Render::CRenderContext& ctx, PHLLS layer, PHLMONITOR monitor, const Time::steady_tp& time, bool popups,
+                         bool lockscreen, bool workspaceScene) {
+        using Original = void (*)(Render::IHyprRenderer*, Render::CRenderContext&, PHLLS, PHLMONITOR, const Time::steady_tp&, bool, bool, bool);
+        reinterpret_cast<Original>(glazeLayerHook->m_original)(self, ctx, layer, monitor, time, popups, lockscreen, workspaceScene);
+        if (!pluginActive || popups || !layer || !monitor || !Hyprion::glazeProtocol)
+            return;
+        Hyprion::glazeProtocol->queue(ctx, layer, monitor);
     }
 
     void drawShadow(CHyprDropShadowDecoration* shadow, Render::CRenderContext& ctx, PHLMONITOR monitor, const float& alpha, const Render::SWindowRenderPresentation& presentation) {
@@ -232,6 +245,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     if (g_pHyprRenderer && !initializeHyprionRenderer())
         throw std::runtime_error("hyprion: failed to initialize the GPU sampling shader");
 
+    Hyprion::glazeProtocol = makeUnique<CHyprionGlazeProtocol>();
+
     auto shadowMethods = HyprlandAPI::findFunctionsByName(handle, "getRenderData");
     std::erase_if(shadowMethods, [](const auto& match) { return !match.demangled.starts_with("CHyprDropShadowDecoration::getRenderData("); });
     if (shadowMethods.size() != 1)
@@ -247,6 +262,14 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     shadowDrawHook = HyprlandAPI::createFunctionHook(handle, shadowDrawMethods.front().address, reinterpret_cast<void*>(&drawShadow));
     if (!shadowDrawHook || !shadowDrawHook->hook())
         throw std::runtime_error("hyprion: cannot hook native shadow pass scheduling");
+
+    auto layerMethods = HyprlandAPI::findFunctionsByName(handle, "renderLayer");
+    std::erase_if(layerMethods, [](const auto& match) { return !match.demangled.starts_with("Render::IHyprRenderer::renderLayer("); });
+    if (layerMethods.size() != 1)
+        throw std::runtime_error("hyprion: cannot locate layer rendering");
+    glazeLayerHook = HyprlandAPI::createFunctionHook(handle, layerMethods.front().address, reinterpret_cast<void*>(&renderLayerHook));
+    if (!glazeLayerHook || !glazeLayerHook->hook())
+        throw std::runtime_error("hyprion: cannot hook layer rendering");
 
     if (g_pEventLoopManager) {
         animationTimer = makeShared<CEventLoopTimer>(std::nullopt, onAnimationTimer, nullptr);
@@ -306,8 +329,13 @@ APICALL EXPORT void PLUGIN_EXIT() {
         HyprlandAPI::removeFunctionHook(pluginHandle, shadowHook);
         shadowHook = nullptr;
     }
+    if (glazeLayerHook) {
+        HyprlandAPI::removeFunctionHook(pluginHandle, glazeLayerHook);
+        glazeLayerHook = nullptr;
+    }
     shadowWindows.clear();
     lastFocusedWindow = PHLWINDOWREF{};
+    Hyprion::glazeProtocol.reset();
     if (g_pHyprRenderer)
         g_pHyprRenderer->context().m_pass.removeAllOfType("hyprion");
     destroyHyprionRenderer();

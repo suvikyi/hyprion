@@ -8,6 +8,20 @@ The inset overlays the window surface; the outset occupies reserved space outsid
 
 Requires **Hyprland 0.57.0**, matching development headers, and the OpenGL renderer.
 
+## Compositor glaze protocol
+
+Hyprion owns a plugin-local `hyprion_glaze_manager_v1` global. A Wayland client
+attaches a glaze object to a `wl_surface`, supplies a surface-local box, band
+widths, corner geometry and the same OKLab style parameters as the border, and
+Hyprion draws the ring while that surface is rendered. The client receives no
+pixels and needs no screencopy permission; the compositor samples the exact
+framebuffer it already uses for window borders.
+
+The first implementation covers the inset band on layer-shell surfaces. The
+client side lives in [irides](https://github.com/suvikyi/irides): its `Glaze`
+component uses this path when the global is present and keeps its local
+ShaderEffect as the fallback for other compositors.
+
 ## Install
 
 Add the published Git repository, then enable Hyprion:

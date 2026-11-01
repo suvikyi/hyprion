@@ -1,5 +1,6 @@
 #include "HyprionDecoration.hpp"
 #include "HyprionConfig.hpp"
+#include "HyprionShader.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1099,6 +1100,167 @@ void CHyprionDecoration::drawPass(Render::CRenderContext& ctx, float alpha, cons
     snapshots.vertical->getTexture()->unbind();
     glActiveTexture(GL_TEXTURE0);
     snapshots.horizontal->getTexture()->unbind();
+}
+
+bool hyprionDrawInsetGlaze(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHyprionGlazeParams& params) {
+    if (!g_pHyprRenderer || !g_pHyprOpenGL || !monitor || !std::isfinite(params.thickness) || params.thickness <= 0.F)
+        return false;
+    if (!shader && !initializeHyprionRenderer())
+        return false;
+
+    auto& renderData = ctx.m_data;
+    if (renderData.damage.empty() || !renderData.currentFB)
+        return false;
+
+    const auto framebuffer = renderData.currentFB;
+    const auto imageDescription = framebuffer->imageDescription();
+    if (!imageDescription.valid() || imageDescription->value().icc.present)
+        return false;
+
+    const double modificationScale = renderData.renderModif.combinedScale();
+    const double requestedThickness = std::round(std::round(static_cast<double>(params.thickness) * monitor->m_scale) * modificationScale);
+    const double boundedThickness = std::clamp(requestedThickness, 1.0, 4096.0);
+    const int thickness = static_cast<int>(boundedThickness);
+    const double surfaceRounding = std::max(0.0, static_cast<double>(params.radius) * monitor->m_scale - 1.0) * modificationScale;
+    const float roundingPower = std::clamp(std::isfinite(params.roundingPower) ? params.roundingPower : 2.0F, 1.0F, 10.0F);
+    if (!std::isfinite(surfaceRounding) || surfaceRounding < 0.0)
+        return false;
+
+    CBox renderBox = params.box;
+    renderBox.scale(monitor->m_scale).round();
+    renderData.renderModif.applyToBox(renderBox);
+    if (renderBox.width <= 0.0 || renderBox.height <= 0.0 || !std::isfinite(renderBox.width) || !std::isfinite(renderBox.height))
+        return false;
+
+    const float rounding = static_cast<float>(std::clamp(surfaceRounding, 0.0, std::min(renderBox.width, renderBox.height) * 0.5));
+    const double requestedSnapshotExtent = std::ceil(std::max(boundedThickness, static_cast<double>(rounding) + 1.0));
+    const int maximumStrip = std::min({static_cast<int>(framebuffer->m_size.x), static_cast<int>(framebuffer->m_size.y), std::numeric_limits<int>::max() / 2});
+    if (maximumStrip < 1)
+        return false;
+    const int snapshotExtent = static_cast<int>(std::clamp(requestedSnapshotExtent, 1.0, static_cast<double>(maximumStrip)));
+
+    CBox targetBox = renderBox;
+    targetBox.transform(Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform)), monitor->m_transformedSize.x, monitor->m_transformedSize.y);
+    targetBox.round();
+
+    int left = 0, bottom = 0, width = 0, height = 0;
+    if (!safeRoundedInt(targetBox.x, left) || !safeRoundedInt(targetBox.y, bottom) || !safeRoundedInt(targetBox.width, width) ||
+        !safeRoundedInt(targetBox.height, height) || width <= 0 || height <= 0)
+        return false;
+
+    CRegion borderRegion = renderData.damage.copy().intersect(renderBox);
+    const double borderExtent = static_cast<double>(thickness) + rounding;
+    if (renderBox.width > 2.0 * borderExtent && renderBox.height > 2.0 * borderExtent)
+        borderRegion.subtract(renderBox.copy().expand(-borderExtent));
+    if (borderRegion.empty())
+        return false;
+
+    const auto defaultDescription = NColorManagement::getDefaultImageDescription();
+    if (!defaultDescription.valid() || defaultDescription->value().icc.present)
+        return false;
+    const auto sourceDescription = framebuffer->imageDescription();
+    if (!sourceDescription.valid() || sourceDescription->value().icc.present)
+        return false;
+
+    auto* const glFramebuffer = dynamic_cast<CGLFramebuffer*>(framebuffer.get());
+    if (!glFramebuffer || glFramebuffer->getFBID() == 0)
+        return false;
+
+    glActiveTexture(GL_TEXTURE0);
+    if (!ensureSnapshots(monitor, framebuffer, sourceDescription, static_cast<int>(framebuffer->m_size.x), static_cast<int>(framebuffer->m_size.y), snapshotExtent))
+        return false;
+    framebuffer->bind();
+    auto& snapshots = monitorSnapshots.at(static_cast<uint64_t>(monitor->m_id));
+    if (!snapshots.horizontal || !snapshots.horizontal->getTexture() || !snapshots.vertical || !snapshots.vertical->getTexture())
+        return false;
+
+    GLint previousReadFramebuffer = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previousReadFramebuffer);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, glFramebuffer->getFBID());
+    copyWindowSnapshots(snapshots, static_cast<int>(framebuffer->m_size.x), static_cast<int>(framebuffer->m_size.y), left, bottom, width, height,
+                        snapshotExtent);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previousReadFramebuffer));
+
+    const auto inputSettings = g_pHyprRenderer->getCMSettings(ctx, sourceDescription, defaultDescription);
+    const auto outputSettings = g_pHyprRenderer->getCMSettings(ctx, defaultDescription, imageDescription);
+    const float reference = inputSettings.dstRefLuminance;
+    if (!std::isfinite(reference) || reference <= 0.0F)
+        return false;
+
+    const auto toDefault = matrixFor(inputSettings.convertMatrix);
+    const auto fromDefault = matrixFor(outputSettings.convertMatrix);
+    const auto projection = g_pHyprRenderer->projectBoxToTarget(ctx, renderBox);
+
+    auto activeShader = g_pHyprOpenGL->useShader(shader);
+    activeShader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_TRUE, projection.getMatrix());
+    glUniform1i(uniforms.horizontal, 0);
+    glUniform1i(uniforms.vertical, 1);
+    glUniform4f(uniforms.windowBox, static_cast<float>(left), static_cast<float>(bottom), static_cast<float>(width), static_cast<float>(height));
+    setFloat(uniforms.thickness, static_cast<float>(thickness));
+    setInt(uniforms.outset, 0);
+    setInt(uniforms.snapshotExtent, snapshotExtent);
+    setFloat(uniforms.rounding, rounding);
+    setFloat(uniforms.innerRounding, std::max(rounding - static_cast<float>(thickness), 0.F));
+    setFloat(uniforms.roundingPower, roundingPower);
+    setFloat(uniforms.strength, params.style.strength);
+    setFloat(uniforms.opacity, std::clamp(params.style.opacity * params.alpha, 0.F, 1.F));
+    setFloat(uniforms.lightness, params.style.lightness);
+    setFloat(uniforms.saturation, params.style.saturation);
+    setFloat(uniforms.chroma, params.style.chroma);
+    setFloat(uniforms.hue, params.style.hue);
+    if (params.style.tintStrength > 0.F) {
+        const auto tintChroma = toOklabChroma(params.style.tintColor, inputSettings.convertMatrix);
+        glUniform2f(uniforms.tintChroma, tintChroma[0], tintChroma[1]);
+    } else
+        glUniform2f(uniforms.tintChroma, 0.F, 0.F);
+    setFloat(uniforms.tintStrength, params.style.tintStrength);
+    setFloat(uniforms.orbitPhase, 0.F);
+    setFloat(uniforms.orbitLength, 0.F);
+    setFloat(uniforms.orbitLightness, 0.F);
+    setFloat(uniforms.orbitSaturation, 1.F);
+    setFloat(uniforms.orbitChroma, 0.F);
+    setFloat(uniforms.orbitHue, 0.F);
+    setFloat(uniforms.orbitStrength, 0.F);
+    setFloat(uniforms.orbitOpacity, 0.F);
+    setFloat(uniforms.orbitAmount, 0.F);
+    glUniform2f(uniforms.orbitTintChroma, 0.F, 0.F);
+    setFloat(uniforms.orbitTintStrength, 0.F);
+    if (uniforms.cornerArcTable >= 0) {
+        const std::array<GLfloat, 65> zeroTable{};
+        glUniform1fv(uniforms.cornerArcTable, static_cast<GLsizei>(zeroTable.size()), zeroTable.data());
+    }
+    setInt(uniforms.sourceTF, static_cast<GLint>(inputSettings.sourceTF));
+    setInt(uniforms.targetTF, static_cast<GLint>(outputSettings.targetTF));
+    if (uniforms.sourceRange >= 0)
+        glUniform2f(uniforms.sourceRange, inputSettings.srcTFRange.min, inputSettings.srcTFRange.max);
+    if (uniforms.targetRange >= 0)
+        glUniform2f(uniforms.targetRange, outputSettings.dstTFRange.min, outputSettings.dstTFRange.max);
+    setFloat(uniforms.defaultReference, reference);
+    setMat3(uniforms.toDefaultPrimaries, toDefault);
+    setMat3(uniforms.fromDefaultPrimaries, fromDefault);
+
+    glActiveTexture(GL_TEXTURE0);
+    snapshots.horizontal->getTexture()->bind();
+    glActiveTexture(GL_TEXTURE1);
+    snapshots.vertical->getTexture()->bind();
+    glActiveTexture(GL_TEXTURE0);
+    glBindVertexArray(activeShader->getUniformLocation(SHADER_SHADER_VAO));
+
+    const bool previousBlend = glIsEnabled(GL_BLEND);
+    g_pHyprOpenGL->blend(false);
+    borderRegion.forEachRect([&](const auto& rect) {
+        g_pHyprOpenGL->scissor(ctx, &rect, renderData.transformDamage);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    });
+    g_pHyprOpenGL->disableScissor();
+    g_pHyprOpenGL->blend(previousBlend);
+
+    glBindVertexArray(0);
+    glActiveTexture(GL_TEXTURE1);
+    snapshots.vertical->getTexture()->unbind();
+    glActiveTexture(GL_TEXTURE0);
+    snapshots.horizontal->getTexture()->unbind();
+    return true;
 }
 
 eDecorationType CHyprionDecoration::getDecorationType() {

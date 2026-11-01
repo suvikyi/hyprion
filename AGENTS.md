@@ -33,6 +33,7 @@ Use `1.0.0` when the configuration surface and documented behavior are ready to 
 
 ## Local plugin verification
 
+- Run every test that spawns windows, starts a nested compositor, or takes screenshots on **DP-3** in suvikyi's (soryu) environment. Use DP-3 for test surfaces and captures; leave DP-1 and DP-2 untouched.
 - Verify renderer changes in an isolated nested compositor before touching the desktop session.
 - Never overwrite a loaded shared library in place, even after a plugin unload: the dynamic loader may retain its mapping. Install to a temporary file on the same filesystem and rename it atomically.
 - Use a fresh compositor session for updated native-hook code; do not hot-reload the desktop plugin to verify it.
