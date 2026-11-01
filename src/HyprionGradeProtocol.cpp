@@ -189,7 +189,7 @@ void CHyprionGrade::updateSupport() {
     m_resource->sendSupported(supported ? 1 : 0);
 }
 
-void CHyprionGrade::draw(Render::CRenderContext& ctx, PHLMONITOR monitor) {
+void CHyprionGrade::draw(Render::CRenderContext& ctx, PHLMONITOR monitor, const SP<Render::IFramebuffer>& snapshot) {
     if (!m_resource || !monitor || !m_enabled || !m_supported || m_width <= 0 || m_height <= 0 || m_areas == 0)
         return;
 
@@ -254,6 +254,7 @@ void CHyprionGrade::draw(Render::CRenderContext& ctx, PHLMONITOR monitor) {
                              .alpha = alpha,
                              .fullSnapshot = true,
                              .snapshotOnly = false,
+                             .snapshot = snapshot,
                              .clipToDamageBox = false,
                          });
     };
@@ -338,9 +339,12 @@ class CHyprionGradeGroupPassElement final : public IPassElement {
     CHyprionGradeGroupPassElement(std::vector<CHyprionGrade*> grades, PHLMONITOR monitor) : m_grades(std::move(grades)), m_monitor(monitor) {}
 
     std::vector<UP<IPassElement>> draw(Render::CRenderContext& ctx) override {
+        SP<Render::IFramebuffer> snapshot;
+        if (!hyprionCaptureGradeSnapshot(ctx, m_monitor, snapshot))
+            return {};
         for (auto* grade : m_grades)
             if (grade)
-                grade->draw(ctx, m_monitor);
+                grade->draw(ctx, m_monitor, snapshot);
         return {};
     }
 

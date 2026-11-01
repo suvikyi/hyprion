@@ -20,7 +20,7 @@ class CHyprionGrade {
     ~CHyprionGrade();
 
     bool good() const;
-    void draw(Render::CRenderContext& ctx, PHLMONITOR monitor);
+    void draw(Render::CRenderContext& ctx, PHLMONITOR monitor, const SP<Render::IFramebuffer>& snapshot);
     CBox boxFor(PHLMONITOR monitor) const;
 
   private:

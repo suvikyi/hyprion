@@ -219,6 +219,40 @@ void destroyHyprionGradeMonitor(PHLMONITOR monitor) {
     snapshotCache.destroyMonitor(monitor);
 }
 
+bool hyprionCaptureGradeSnapshot(Render::CRenderContext& ctx, PHLMONITOR monitor, SP<Render::IFramebuffer>& snapshot) {
+    if (!g_pHyprRenderer || !g_pHyprOpenGL || !monitor)
+        return false;
+    auto& renderData = ctx.m_data;
+    if (!renderData.currentFB)
+        return false;
+    const auto framebuffer = renderData.currentFB;
+    const auto description = framebuffer->imageDescription();
+    if (!description.valid() || description->value().icc.present)
+        return false;
+    auto* const glFramebuffer = dynamic_cast<CGLFramebuffer*>(framebuffer.get());
+    if (!glFramebuffer || glFramebuffer->getFBID() == 0)
+        return false;
+    const double width = framebuffer->m_size.x;
+    const double height = framebuffer->m_size.y;
+    if (!std::isfinite(width) || !std::isfinite(height) || width < 1 || height < 1 || width > std::numeric_limits<int>::max() ||
+        height > std::numeric_limits<int>::max())
+        return false;
+
+    snapshot = snapshotCache.ensureAtlas(monitor, framebuffer, description);
+    if (!snapshot)
+        return false;
+    const auto texture = snapshot->getTexture();
+    if (!texture)
+        return false;
+    texture->bind();
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, glFramebuffer->getFBID());
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    texture->unbind();
+    framebuffer->bind();
+    return true;
+}
+
 bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHyprionGradeRequest& request) {
     if (!g_pHyprRenderer || !g_pHyprOpenGL || !monitor)
         return false;
@@ -264,9 +298,9 @@ bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHy
     if (borderRegion.empty())
         return false;
 
-    auto snapshotFramebuffer = framebuffer;
+    auto snapshotFramebuffer = request.snapshot ? request.snapshot : framebuffer;
     SP<IFramebuffer> liveBlurFramebuffer;
-    if (request.source != SHyprionGradeSource::CURRENT_FRAMEBUFFER) {
+    if (!request.snapshot && request.source != SHyprionGradeSource::CURRENT_FRAMEBUFFER) {
         snapshotFramebuffer = monitor->resources()->m_blurFB;
         if (!snapshotFramebuffer || !snapshotFramebuffer->getTexture() || snapshotFramebuffer->m_size != framebuffer->m_size)
             return false;
@@ -288,20 +322,24 @@ bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHy
 
     SP<IFramebuffer> snapshotFramebufferResult;
     if (request.fullSnapshot) {
-        if (request.source != SHyprionGradeSource::CURRENT_FRAMEBUFFER)
-            return false;
-        snapshotFramebufferResult = snapshotCache.ensureAtlas(monitor, framebuffer, sourceDescription);
-        if (!snapshotFramebufferResult)
-            return false;
-        const auto snapshotTexture = snapshotFramebufferResult->getTexture();
-        if (!snapshotTexture)
-            return false;
-        snapshotTexture->bind();
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, glFramebuffer->getFBID());
-        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, left, bottom, left, bottom, width, height);
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-        snapshotTexture->unbind();
-        framebuffer->bind();
+        if (request.snapshot) {
+            snapshotFramebufferResult = request.snapshot;
+        } else {
+            if (request.source != SHyprionGradeSource::CURRENT_FRAMEBUFFER)
+                return false;
+            snapshotFramebufferResult = snapshotCache.ensureAtlas(monitor, framebuffer, sourceDescription);
+            if (!snapshotFramebufferResult)
+                return false;
+            const auto snapshotTexture = snapshotFramebufferResult->getTexture();
+            if (!snapshotTexture)
+                return false;
+            snapshotTexture->bind();
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, glFramebuffer->getFBID());
+            glCopyTexSubImage2D(GL_TEXTURE_2D, 0, left, bottom, left, bottom, width, height);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+            snapshotTexture->unbind();
+            framebuffer->bind();
+        }
     } else {
         const bool ready = snapshotCache.ensureStrips(monitor, snapshotFramebuffer, sourceDescription, targetWidth, targetHeight, request.snapshotExtent);
         framebuffer->bind();

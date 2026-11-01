@@ -5,6 +5,7 @@
 
 #include <array>
 #include <hyprland/src/output/Monitor.hpp>
+#include <hyprland/src/render/Framebuffer.hpp>
 #include <hyprland/src/render/Context.hpp>
 
 enum class SHyprionGradeArea : uint8_t {
@@ -43,9 +44,11 @@ struct SHyprionGradeRequest {
     float                 alpha = 1.F;
     bool                  fullSnapshot = false;
     bool                  snapshotOnly = false;
+    SP<Render::IFramebuffer> snapshot;
     bool                  clipToDamageBox = false;
 };
 
+bool hyprionCaptureGradeSnapshot(Render::CRenderContext& ctx, PHLMONITOR monitor, SP<Render::IFramebuffer>& snapshot);
 bool initializeHyprionGradeRenderer();
 void destroyHyprionGradeRenderer();
 void destroyHyprionGradeMonitor(PHLMONITOR monitor);
