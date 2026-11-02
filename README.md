@@ -14,6 +14,12 @@ without changing the exterior border mask or adding a destination snapshot.
 Inset grades still draw over the window; surface-protocol grades retain their
 separate post-surface ordering.
 
+Native insets refresh their strip snapshots from the current window
+framebuffer immediately before drawing. They do not reuse the outset's
+pre-window pixels. Version 0.4.2 fixes a missing inset capture that caused
+absent or fragmented edges, especially when no outset had populated the cache.
+
+
 
 Requires **Hyprland 0.57.0**, matching development headers, and the OpenGL renderer.
 

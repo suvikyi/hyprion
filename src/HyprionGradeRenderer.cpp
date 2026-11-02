@@ -371,7 +371,9 @@ bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHy
         if (!snapshots)
             return false;
 
-        if (request.snapshotOnly) {
+        // Outsets capture before the shadow in a separate pass. Insets have
+        // no earlier capture: refresh from the window immediately before use.
+        if (request.snapshotOnly || request.area == SHyprionGradeArea::INSET) {
             CFramebufferBindingGuard bindings{g_pHyprOpenGL};
             g_pHyprOpenGL->setActiveTexture(GL_TEXTURE0);
 
@@ -393,7 +395,8 @@ bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHy
                 glDeleteFramebuffers(1, &temporaryFramebuffer);
                 g_pHyprOpenGL->onFramebufferDeleted(temporaryFramebuffer);
             }
-            return true;
+            if (request.snapshotOnly)
+                return true;
         }
     }
 
