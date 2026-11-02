@@ -59,12 +59,16 @@ namespace {
 
     void drawShadow(CHyprDropShadowDecoration* shadow, Render::CRenderContext& ctx, PHLMONITOR monitor, const float& alpha, const Render::SWindowRenderPresentation& presentation) {
         const auto owner = shadowWindows.find(shadow);
-        if (owner != shadowWindows.end()) {
-            if (auto* decoration = findDecoration(owner->second.lock()))
-                decoration->drawOutset(ctx, monitor, alpha, presentation);
-        }
+        auto* decoration = owner != shadowWindows.end() ? findDecoration(owner->second.lock()) : nullptr;
+        if (decoration)
+            decoration->drawOutset(ctx, monitor, alpha, presentation, true);
         using Original = void (*)(CHyprDropShadowDecoration*, Render::CRenderContext&, PHLMONITOR, const float&, const Render::SWindowRenderPresentation&);
         reinterpret_cast<Original>(shadowDrawHook->m_original)(shadow, ctx, monitor, alpha, presentation);
+        // Retain the pre-shadow source, but composite the band before the
+        // window. The window's own rounded coverage must occlude the outset's
+        // inner antialiasing fringe, not be replaced by backdrop pixels.
+        if (decoration)
+            decoration->drawOutset(ctx, monitor, alpha, presentation, false);
     }
 
     void addPassHook(Render::CRenderPass* pass, UP<IPassElement>&& element) {

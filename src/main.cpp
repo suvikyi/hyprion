@@ -234,7 +234,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     for (const auto& window : Desktop::windowState()->windows())
         attachDecoration(window, false);
 
-    return {"hyprion", "Hyprion visual effects for Hyprland", "Suvikyi", "0.4.0"};
+    return {"hyprion", "Hyprion visual effects for Hyprland", "Suvikyi", "0.4.1"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {

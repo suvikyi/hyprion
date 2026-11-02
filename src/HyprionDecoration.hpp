@@ -16,7 +16,8 @@ class CHyprionDecoration final : public IHyprWindowDecoration {
     SDecorationPositioningInfo getPositioningInfo() override;
     void                       onPositioningReply(const SDecorationPositioningReply& reply) override;
     void                       draw(Render::CRenderContext& ctx, PHLMONITOR monitor, float const& alpha, const Render::SWindowRenderPresentation& presentation) override;
-    void                       drawOutset(Render::CRenderContext& ctx, PHLMONITOR monitor, float alpha, const Render::SWindowRenderPresentation& presentation);
+    void                       drawOutset(Render::CRenderContext& ctx, PHLMONITOR monitor, float alpha,
+                                          const Render::SWindowRenderPresentation& presentation, bool snapshotOnly);
     eDecorationType            getDecorationType() override;
     void                       updateWindow(PHLWINDOW window) override;
     void                       damageEntire() override;

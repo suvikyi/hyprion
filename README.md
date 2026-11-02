@@ -6,6 +6,15 @@ Rounded inset and outset borders sample the pixels beneath them and apply a colo
 
 The inset overlays the window surface; the outset occupies reserved space outside it and samples the composited background from before the window's own shadow. Both can be enabled together. Coverage is composited in linear light, so edges are not bit-identical to Hyprland's native border antialiasing. Hyprland's native border is optional: when enabled it wraps the outset — set `general.border_size = 0` to omit it. Native shadow extents and corner radii include the outset.
 
+Native window outsets are drawn after the shadow but **before the window's
+surfaces**, while retaining their pre-shadow source. The window's rounded
+coverage occludes the outset's inner antialiasing fringe. This prevents
+backdrop-coloured pinholes inside opaque window corners (fixed in 0.4.1)
+without changing the exterior border mask or adding a destination snapshot.
+Inset grades still draw over the window; surface-protocol grades retain their
+separate post-surface ordering.
+
+
 Requires **Hyprland 0.57.0**, matching development headers, and the OpenGL renderer.
 
 Hyprion is pronounced like **Hyperion**.

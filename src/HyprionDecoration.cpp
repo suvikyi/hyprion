@@ -180,19 +180,16 @@ void CHyprionDecoration::updateOrbitArcTable(float power) {
 void CHyprionDecoration::draw(Render::CRenderContext& ctx, PHLMONITOR monitor, float const& alpha, const Render::SWindowRenderPresentation& presentation) {
     const auto window = m_window.lock();
     const auto config = hyprionConfig();
-    if (!window || !validMapped(window) || !monitor || !config.enabled || !std::isfinite(alpha) || alpha <= 0.0F)
+    if (!window || !validMapped(window) || !monitor || !config.enabled || !config.inset.enabled || !std::isfinite(alpha) || alpha <= 0.0F)
         return;
     const auto box = monitorLocalBox(monitor, presentation);
     if (box.width <= 0.0 || box.height <= 0.0)
         return;
-    // Consume the pre-shadow snapshot before inset rendering reuses the cache.
-    if (config.outset.enabled)
-        g_pHyprRenderer->addPassElement(ctx, makeUnique<CHyprionPassElement>(this, alpha, box.copy().expand(config.outset.size), true));
-    if (config.inset.enabled)
-        g_pHyprRenderer->addPassElement(ctx, makeUnique<CHyprionPassElement>(this, alpha, box, false));
+    g_pHyprRenderer->addPassElement(ctx, makeUnique<CHyprionPassElement>(this, alpha, box, false));
 }
 
-void CHyprionDecoration::drawOutset(Render::CRenderContext& ctx, PHLMONITOR monitor, float alpha, const Render::SWindowRenderPresentation& presentation) {
+void CHyprionDecoration::drawOutset(Render::CRenderContext& ctx, PHLMONITOR monitor, float alpha,
+                                   const Render::SWindowRenderPresentation& presentation, bool snapshotOnly) {
     const auto window = m_window.lock();
     const auto config = hyprionConfig();
     if (!window || !validMapped(window) || !monitor || !config.enabled || !config.outset.enabled || !std::isfinite(alpha) || alpha <= 0.F)
@@ -200,7 +197,7 @@ void CHyprionDecoration::drawOutset(Render::CRenderContext& ctx, PHLMONITOR moni
     auto box = monitorLocalBox(monitor, presentation);
     box.expand(config.outset.size);
     if (box.width > 0.0 && box.height > 0.0)
-        g_pHyprRenderer->addPassElement(ctx, makeUnique<CHyprionPassElement>(this, alpha, box, true, true));
+        g_pHyprRenderer->addPassElement(ctx, makeUnique<CHyprionPassElement>(this, alpha, box, true, snapshotOnly));
 }
 void CHyprionDecoration::drawPass(Render::CRenderContext& ctx, float alpha, const CBox& monitorLocalBox_, bool outset, bool snapshotOnly) {
     if (snapshotOnly)
