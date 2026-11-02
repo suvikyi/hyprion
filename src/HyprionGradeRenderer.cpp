@@ -36,6 +36,7 @@ namespace {
         GLint thickness = -1;
         GLint outset = -1;
         GLint snapshotExtent = -1;
+        GLint snapshotOffset = -1;
         GLint rounding = -1;
         GLint innerRounding = -1;
         GLint roundingPower = -1;
@@ -129,6 +130,22 @@ namespace {
         setInt(uniforms.hdr, pipeline.hdr ? 1 : 0);
     }
 
+    CBox framebufferBox(Render::CRenderContext& ctx, const CBox& box) {
+        const auto matrix = ctx.m_data.targetProjection.getMatrix();
+        const auto map = [&matrix](double x, double y) {
+            return Vector2D{matrix[0] * x + matrix[1] * y + matrix[2], matrix[3] * x + matrix[4] * y + matrix[5]};
+        };
+        const std::array corners = {map(box.x, box.y), map(box.x + box.width, box.y), map(box.x, box.y + box.height),
+                                    map(box.x + box.width, box.y + box.height)};
+        Vector2D low = corners[0], high = corners[0];
+        for (const auto& corner : corners) {
+            low = Vector2D{std::min(low.x, corner.x), std::min(low.y, corner.y)};
+            high = high.getComponentMax(corner);
+        }
+        const double left = std::floor(low.x), bottom = std::floor(low.y);
+        return CBox{left, bottom, std::ceil(high.x) - left, std::ceil(high.y) - bottom};
+    }
+
     bool safeRoundedInt(double value, int& result) {
         if (!std::isfinite(value) || value < static_cast<double>(std::numeric_limits<int>::min() / 2) ||
             value > static_cast<double>(std::numeric_limits<int>::max() / 2))
@@ -162,6 +179,7 @@ namespace {
             .thickness = glGetUniformLocation(program, "uThickness"),
             .outset = glGetUniformLocation(program, "uOutset"),
             .snapshotExtent = glGetUniformLocation(program, "uSnapshotExtent"),
+            .snapshotOffset = glGetUniformLocation(program, "uSnapshotOffset"),
             .rounding = glGetUniformLocation(program, "uRounding"),
             .innerRounding = glGetUniformLocation(program, "uInnerRounding"),
             .roundingPower = glGetUniformLocation(program, "uRoundingPower"),
@@ -219,45 +237,63 @@ void destroyHyprionGradeMonitor(PHLMONITOR monitor) {
     snapshotCache.destroyMonitor(monitor);
 }
 
-bool hyprionCaptureGradeSnapshot(Render::CRenderContext& ctx, PHLMONITOR monitor, SP<Render::IFramebuffer>& snapshot, const CBox& bounds) {
-    if (!g_pHyprRenderer || !g_pHyprOpenGL || !monitor)
+CRegion hyprionGradeRegion(const SHyprionGradeRequest& request) {
+    CRegion region{request.renderBox};
+    // The corner mask can occupy pixels inside the base rectangle's bounding
+    // box. Keep corner-sized tiles, not merely the straight rectangular ring.
+    const double extent = request.thickness + request.rounding + 1.0;
+    if (request.area != SHyprionGradeArea::FILL && request.renderBox.width > 2.0 * extent && request.renderBox.height > 2.0 * extent)
+        region.subtract(CBox{request.renderBox.x + extent, request.renderBox.y + extent,
+                             request.renderBox.width - 2.0 * extent, request.renderBox.height - 2.0 * extent});
+    if (request.clipBox)
+        region.intersect(*request.clipBox);
+    return region;
+}
+
+CRegion hyprionGradeFramebufferRegion(Render::CRenderContext& ctx, const CRegion& region) {
+    CRegion result;
+    region.forEachRect([&](const auto& rect) {
+        result.add(framebufferBox(ctx, CBox{double(rect.x1), double(rect.y1), double(rect.x2 - rect.x1), double(rect.y2 - rect.y1)}));
+    });
+    return result;
+}
+
+bool hyprionCaptureGradeSnapshot(Render::CRenderContext& ctx, PHLMONITOR monitor, SHyprionGradeSnapshot& snapshot, const CRegion& region) {
+    snapshot.tiles.clear();
+    if (!g_pHyprRenderer || !g_pHyprOpenGL || !monitor || !ctx.m_data.currentFB)
         return false;
-    auto& renderData = ctx.m_data;
-    if (!renderData.currentFB)
-        return false;
-    const auto framebuffer = renderData.currentFB;
+    const auto framebuffer = ctx.m_data.currentFB;
     const auto description = framebuffer->imageDescription();
     if (!description.valid() || description->value().icc.present)
         return false;
     auto* const glFramebuffer = dynamic_cast<CGLFramebuffer*>(framebuffer.get());
     if (!glFramebuffer || glFramebuffer->getFBID() == 0)
         return false;
-    const double width = framebuffer->m_size.x;
-    const double height = framebuffer->m_size.y;
-    if (!std::isfinite(width) || !std::isfinite(height) || width < 1 || height < 1 || width > std::numeric_limits<int>::max() ||
-        height > std::numeric_limits<int>::max())
+    const auto clipped = region.copy().intersect(CBox{{}, framebuffer->m_size});
+    if (clipped.empty())
         return false;
 
-    const int left = std::max(0, static_cast<int>(std::floor(bounds.x)));
-    const int bottom = std::max(0, static_cast<int>(std::floor(bounds.y)));
-    const int right = std::min(static_cast<int>(width), static_cast<int>(std::ceil(bounds.x + bounds.width)));
-    const int top = std::min(static_cast<int>(height), static_cast<int>(std::ceil(bounds.y + bounds.height)));
-    if (right <= left || top <= bottom)
-        return false;
-
-    snapshot = snapshotCache.ensureAtlas(monitor, framebuffer, description);
-    if (!snapshot)
-        return false;
-    const auto texture = snapshot->getTexture();
-    if (!texture)
-        return false;
-    texture->bind();
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, glFramebuffer->getFBID());
-    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, left, bottom, left, bottom, right - left, top - bottom);
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-    texture->unbind();
-    framebuffer->bind();
-    return true;
+    CFramebufferBindingGuard bindings{g_pHyprOpenGL};
+    g_pHyprOpenGL->setActiveTexture(GL_TEXTURE0);
+    snapshotCache.beginCapture(monitor);
+    bool ready = true;
+    clipped.forEachRect([&](const auto& rect) {
+        if (!ready)
+            return;
+        const CBox box{double(rect.x1), double(rect.y1), double(rect.x2 - rect.x1), double(rect.y2 - rect.y1)};
+        auto tile = snapshotCache.ensureTile(monitor, framebuffer, description, box.size());
+        if (!tile || !tile->getTexture()) {
+            ready = false;
+            return;
+        }
+        tile->getTexture()->bind();
+        g_pHyprOpenGL->bindFramebuffer(GL_READ_FRAMEBUFFER, glFramebuffer->getFBID());
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, rect.x1, rect.y1, rect.x2 - rect.x1, rect.y2 - rect.y1);
+        tile->getTexture()->unbind();
+        snapshot.tiles.push_back({std::move(tile), box});
+    });
+    return ready;
 }
 
 bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHyprionGradeRequest& request) {
@@ -287,25 +323,21 @@ bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHy
     const int targetWidth = static_cast<int>(rawWidth);
     const int targetHeight = static_cast<int>(rawHeight);
 
-    CBox targetBox = renderBox;
-    targetBox.transform(Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform)), monitor->m_transformedSize.x, monitor->m_transformedSize.y);
-    targetBox.round();
+    const CBox targetBox = framebufferBox(ctx, renderBox);
 
     int left = 0, bottom = 0, width = 0, height = 0;
     if (!safeRoundedInt(targetBox.x, left) || !safeRoundedInt(targetBox.y, bottom) || !safeRoundedInt(targetBox.width, width) ||
         !safeRoundedInt(targetBox.height, height) || width <= 0 || height <= 0)
         return false;
 
-    CRegion borderRegion = renderData.damage.copy().intersect(renderBox);
-    const double borderExtent = static_cast<double>(request.thickness) + request.rounding;
-    if (request.area != SHyprionGradeArea::FILL && renderBox.width > 2.0 * borderExtent && renderBox.height > 2.0 * borderExtent)
-        borderRegion.subtract(renderBox.copy().expand(-borderExtent));
+    CRegion borderRegion = hyprionGradeRegion(request).intersect(renderData.damage);
     if (request.clipToDamageBox && renderData.clipBox.width != 0 && renderData.clipBox.height != 0)
         borderRegion.intersect(renderData.clipBox);
+    borderRegion = hyprionGradeFramebufferRegion(ctx, borderRegion);
     if (borderRegion.empty())
         return false;
 
-    auto snapshotFramebuffer = request.snapshot ? request.snapshot : framebuffer;
+    auto snapshotFramebuffer = framebuffer;
     SP<IFramebuffer> liveBlurFramebuffer;
     if (!request.snapshot && request.source != SHyprionGradeSource::CURRENT_FRAMEBUFFER) {
         snapshotFramebuffer = monitor->resources()->m_blurFB;
@@ -327,26 +359,9 @@ bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHy
     if (!glFramebuffer || glFramebuffer->getFBID() == 0)
         return false;
 
-    SP<IFramebuffer> snapshotFramebufferResult;
     if (request.fullSnapshot) {
-        if (request.snapshot) {
-            snapshotFramebufferResult = request.snapshot;
-        } else {
-            if (request.source != SHyprionGradeSource::CURRENT_FRAMEBUFFER)
-                return false;
-            snapshotFramebufferResult = snapshotCache.ensureAtlas(monitor, framebuffer, sourceDescription);
-            if (!snapshotFramebufferResult)
-                return false;
-            const auto snapshotTexture = snapshotFramebufferResult->getTexture();
-            if (!snapshotTexture)
-                return false;
-            snapshotTexture->bind();
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, glFramebuffer->getFBID());
-            glCopyTexSubImage2D(GL_TEXTURE_2D, 0, left, bottom, left, bottom, width, height);
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-            snapshotTexture->unbind();
-            framebuffer->bind();
-        }
+        if (!request.snapshot || request.snapshot->tiles.empty())
+            return false;
     } else {
         const bool ready = snapshotCache.ensureStrips(monitor, snapshotFramebuffer, sourceDescription, targetWidth, targetHeight, request.snapshotExtent);
         framebuffer->bind();
@@ -357,8 +372,8 @@ bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHy
             return false;
 
         if (request.snapshotOnly) {
-            GLint previousReadFramebuffer = 0;
-            glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previousReadFramebuffer);
+            CFramebufferBindingGuard bindings{g_pHyprOpenGL};
+            g_pHyprOpenGL->setActiveTexture(GL_TEXTURE0);
 
             GLuint readFramebuffer = glFramebuffer->getFBID();
             GLuint temporaryFramebuffer = 0;
@@ -366,17 +381,18 @@ bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHy
             if (liveBlurTexture && liveBlurTexture->m_texID != 0) {
                 glGenFramebuffers(1, &temporaryFramebuffer);
                 if (temporaryFramebuffer != 0) {
-                    glBindFramebuffer(GL_READ_FRAMEBUFFER, temporaryFramebuffer);
+                    g_pHyprOpenGL->bindFramebuffer(GL_READ_FRAMEBUFFER, temporaryFramebuffer);
                     glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, liveBlurTexture->m_texID, 0);
                     readFramebuffer = temporaryFramebuffer;
                 }
             }
 
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, readFramebuffer);
+            g_pHyprOpenGL->bindFramebuffer(GL_READ_FRAMEBUFFER, readFramebuffer);
             snapshotCache.copyStrips(monitor, targetWidth, targetHeight, left, bottom, width, height, request.snapshotExtent);
-            glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previousReadFramebuffer));
-            if (temporaryFramebuffer != 0)
+            if (temporaryFramebuffer != 0) {
                 glDeleteFramebuffers(1, &temporaryFramebuffer);
+                g_pHyprOpenGL->onFramebufferDeleted(temporaryFramebuffer);
+            }
             return true;
         }
     }
@@ -429,36 +445,45 @@ bool hyprionDrawGrade(Render::CRenderContext& ctx, PHLMONITOR monitor, const SHy
         glUniform1fv(uniforms.cornerArcTable, static_cast<GLsizei>(request.cornerArcTable.size()), request.cornerArcTable.data());
     setColorPipeline(pipeline);
 
-    if (request.fullSnapshot) {
-        const auto snapshotTexture = snapshotFramebufferResult->getTexture();
-        glActiveTexture(GL_TEXTURE0);
-        snapshotTexture->bind();
-    } else {
+    g_pHyprOpenGL->setActiveTexture(GL_TEXTURE0);
+    if (!request.fullSnapshot) {
         const auto* snapshots = snapshotCache.strips(monitor);
-        glActiveTexture(GL_TEXTURE0);
+        g_pHyprOpenGL->setActiveTexture(GL_TEXTURE0);
         snapshots->horizontal->getTexture()->bind();
-        glActiveTexture(GL_TEXTURE1);
+        g_pHyprOpenGL->setActiveTexture(GL_TEXTURE1);
         snapshots->vertical->getTexture()->bind();
-        glActiveTexture(GL_TEXTURE0);
+        g_pHyprOpenGL->setActiveTexture(GL_TEXTURE0);
     }
     glBindVertexArray(activeShader->getUniformLocation(SHADER_SHADER_VAO));
 
     const bool previousBlend = glIsEnabled(GL_BLEND);
     g_pHyprOpenGL->blend(false);
-    borderRegion.forEachRect([&](const auto& rect) {
-        g_pHyprOpenGL->scissor(ctx, &rect, renderData.transformDamage);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    });
+    const auto drawRegion = [&](const CRegion& region) {
+        region.forEachRect([&](const auto& rect) {
+            g_pHyprOpenGL->scissor(ctx, &rect, false);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        });
+    };
+    if (request.fullSnapshot) {
+        for (const auto& tile : request.snapshot->tiles) {
+            const auto region = borderRegion.copy().intersect(tile.sourceBox);
+            if (region.empty())
+                continue;
+            tile.framebuffer->getTexture()->bind();
+            glUniform2i(uniforms.snapshotOffset, static_cast<int>(tile.sourceBox.x), static_cast<int>(tile.sourceBox.y));
+            drawRegion(region);
+            tile.framebuffer->getTexture()->unbind();
+        }
+    } else
+        drawRegion(borderRegion);
     g_pHyprOpenGL->disableScissor();
     g_pHyprOpenGL->blend(previousBlend);
 
     glBindVertexArray(0);
-    if (request.fullSnapshot) {
-        snapshotFramebufferResult->getTexture()->unbind();
-    } else {
-        glActiveTexture(GL_TEXTURE1);
+    if (!request.fullSnapshot) {
+        g_pHyprOpenGL->setActiveTexture(GL_TEXTURE1);
         snapshotCache.strips(monitor)->vertical->getTexture()->unbind();
-        glActiveTexture(GL_TEXTURE0);
+        g_pHyprOpenGL->setActiveTexture(GL_TEXTURE0);
         snapshotCache.strips(monitor)->horizontal->getTexture()->unbind();
     }
     return true;

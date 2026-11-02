@@ -35,18 +35,27 @@ namespace Hyprion {
         uint64_t         descriptionId = 0;
     };
 
+    struct SSnapshotPool {
+        // Separate band orientations from fills to avoid retaining their
+        // enclosing screen-sized rectangle when scratch pages grow.
+        std::array<std::vector<SAtlas>, 3> pages;
+        std::array<std::size_t, 3> used{};
+    };
+
     class CSnapshotCache {
       public:
         bool                  ensureStrips(PHLMONITOR monitor, const SP<Render::IFramebuffer>& source, const NColorManagement::PImageDescription& description, int width,
                                             int height, int strip);
         const SSnapshotSet*   strips(PHLMONITOR monitor) const;
         void                  copyStrips(PHLMONITOR monitor, int targetWidth, int targetHeight, int left, int bottom, int width, int height, int strip);
-        SP<Render::IFramebuffer>      ensureAtlas(PHLMONITOR monitor, const SP<Render::IFramebuffer>& source, const NColorManagement::PImageDescription& description);
+        void beginCapture(PHLMONITOR monitor);
+        SP<Render::IFramebuffer> ensureTile(PHLMONITOR monitor, const SP<Render::IFramebuffer>& source,
+                                          const NColorManagement::PImageDescription& description, const Vector2D& size);
         void                  clear();
         void                  destroyMonitor(PHLMONITOR monitor);
 
       private:
         std::unordered_map<uint64_t, SSnapshotSet> m_strips;
-        std::unordered_map<uint64_t, SAtlas>       m_atlases;
+        std::unordered_map<uint64_t, SSnapshotPool> m_tiles;
     };
 }

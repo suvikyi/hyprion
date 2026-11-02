@@ -7,13 +7,13 @@
 #include <hyprland/src/protocols/WaylandProtocol.hpp>
 
 #include <unordered_map>
-#include <unordered_set>
 
 #include "hyprion-grade-v1.hpp"
 
 class CHyprionGradeManagerV1;
 class CHyprionGradeV1;
 class CWLSurfaceResource;
+class CSurfacePassElement;
 
 class CHyprionGrade {
   public:
@@ -21,18 +21,15 @@ class CHyprionGrade {
     ~CHyprionGrade();
 
     bool good() const;
-    void draw(Render::CRenderContext& ctx, PHLMONITOR monitor, const SP<Render::IFramebuffer>& snapshot);
-    CBox boxFor(PHLMONITOR monitor) const;
-    CBox snapshotBounds(Render::CRenderContext& ctx, PHLMONITOR monitor) const;
-    PHLMONITOR monitor() const;
+    void appendRequests(Render::CRenderContext& ctx, PHLMONITOR monitor, const CBox& surfaceBox, const CBox& clipBox, float alpha,
+                        std::vector<SHyprionGradeRequest>& requests) const;
 
   private:
     void setResource(SP<CHyprionGradeV1> resource);
     void destroy();
-    void damage();
-    void damageSourceBand(PHLMONITOR monitor);
+    void damage(bool force = true);
     void updateSupport();
-    CBox surfaceLocalBox() const;
+    CBox damageBox() const;
 
     SP<CHyprionGradeV1>    m_resource;
     WP<CWLSurfaceResource> m_surface;
@@ -53,6 +50,7 @@ class CHyprionGrade {
     int           m_mode = -1; // auto: over for outset, in_place otherwise
     bool          m_supported = false;
     bool          m_supportSent = false;
+    CBox          m_lastDamageBox;
 
     CHyprSignalListener m_surfaceDestroyed;
     CHyprSignalListener m_surfaceCommitted;
@@ -66,26 +64,16 @@ class CHyprionGradeProtocol : public IWaylandProtocol {
     ~CHyprionGradeProtocol() override;
 
     void bindManager(wl_client* client, void* data, uint32_t ver, uint32_t id) override;
-    void queue(Render::CRenderContext& ctx, const PHLLS& layer, PHLMONITOR monitor);
-    void damageDirtyBands(PHLMONITOR monitor);
+    void queue(Render::CRenderPass& pass, CSurfacePassElement& surface);
 
   private:
-    struct SSourceListener {
-        CHyprSignalListener commit;
-        CHyprSignalListener destroy;
-    };
-
     void destroyManager(CHyprionGradeManagerV1* manager);
     void destroyGrade(CHyprionGrade* grade);
     void getGrade(CHyprionGradeManagerV1* manager, uint32_t id, wl_resource* surface);
-    void markSourceDirty(PHLMONITOR monitor);
-    void syncSourceListeners(PHLMONITOR monitor);
 
     std::vector<UP<CHyprionGradeManagerV1>> m_managers;
-    std::vector<UP<CHyprionGrade>>          m_grades;
-    std::unordered_map<CWLSurfaceResource*, std::vector<CHyprionGrade*>> m_bySurface;
-    std::unordered_map<CWLSurfaceResource*, SSourceListener>              m_sourceListeners;
-    std::unordered_set<uint64_t>                                         m_dirtyMonitors;
+    std::vector<SP<CHyprionGrade>>          m_grades;
+    std::unordered_map<CWLSurfaceResource*, std::vector<SP<CHyprionGrade>>> m_bySurface;
 
     friend class CHyprionGrade;
 };

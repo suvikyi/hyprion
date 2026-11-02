@@ -25,6 +25,15 @@ enum class SHyprionGradeSource : uint8_t {
     LIVE_BLUR,
 };
 
+struct SHyprionSnapshotTile {
+    SP<Render::IFramebuffer> framebuffer;
+    CBox sourceBox;
+};
+
+struct SHyprionGradeSnapshot {
+    std::vector<SHyprionSnapshotTile> tiles;
+};
+
 // One grade draw in monitor-local coordinates. Geometry that depends on the
 // window or protocol surface is resolved by the caller; the renderer owns
 // snapshots, colour management, uniforms, and the actual draw.
@@ -44,11 +53,15 @@ struct SHyprionGradeRequest {
     float                 alpha = 1.F;
     bool                  fullSnapshot = false;
     bool                  snapshotOnly = false;
-    SP<Render::IFramebuffer> snapshot;
+    const SHyprionGradeSnapshot* snapshot = nullptr;
     bool                  clipToDamageBox = false;
+    std::optional<CBox> clipBox;
 };
 
-bool hyprionCaptureGradeSnapshot(Render::CRenderContext& ctx, PHLMONITOR monitor, SP<Render::IFramebuffer>& snapshot, const CBox& bounds);
+// Regions are in the same pixel coordinate space as renderBox and render damage.
+CRegion hyprionGradeRegion(const SHyprionGradeRequest& request);
+CRegion hyprionGradeFramebufferRegion(Render::CRenderContext& ctx, const CRegion& region);
+bool hyprionCaptureGradeSnapshot(Render::CRenderContext& ctx, PHLMONITOR monitor, SHyprionGradeSnapshot& snapshot, const CRegion& region);
 bool initializeHyprionGradeRenderer();
 void destroyHyprionGradeRenderer();
 void destroyHyprionGradeMonitor(PHLMONITOR monitor);

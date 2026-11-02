@@ -13,6 +13,7 @@
 #include <hyprland/src/protocols/core/Compositor.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/render/pass/PassElement.hpp>
+#include <hyprland/src/render/pass/SurfacePassElement.hpp>
 
 namespace {
     constexpr uint32_t SUPPORTED_AREAS = HYPRION_GRADE_V1_AREA_INSET | HYPRION_GRADE_V1_AREA_OUTSET | HYPRION_GRADE_V1_AREA_FILL;
@@ -30,18 +31,8 @@ namespace {
         return style;
     }
 
-    void addBox(CBox& bounds, const CBox& box) {
-        if (box.width <= 0.0 || box.height <= 0.0)
-            return;
-        if (bounds.width <= 0.0 || bounds.height <= 0.0) {
-            bounds = box;
-            return;
-        }
-        const double left = std::min(bounds.x, box.x);
-        const double top = std::min(bounds.y, box.y);
-        const double right = std::max(bounds.x + bounds.width, box.x + box.width);
-        const double bottom = std::max(bounds.y + bounds.height, box.y + box.height);
-        bounds = CBox{left, top, right - left, bottom - top};
+    CBox expandBox(const CBox& box, double amount) {
+        return CBox{box.x - amount, box.y - amount, box.width + 2.0 * amount, box.height + 2.0 * amount};
     }
 }
 
@@ -105,7 +96,7 @@ void CHyprionGrade::setResource(SP<CHyprionGradeV1> resource) {
 
     m_resource->setSetMode([this](CHyprionGradeV1*, hyprionGradeV1Mode mode) {
         const uint32_t requested = static_cast<uint32_t>(mode);
-        if ((requested & SUPPORTED_MODES) == 0) {
+        if (requested != HYPRION_GRADE_V1_MODE_IN_PLACE && requested != HYPRION_GRADE_V1_MODE_OVER) {
             m_resource->error(HYPRION_GRADE_V1_ERROR_UNSUPPORTED, "unsupported grade mode");
             return;
         }
@@ -139,7 +130,7 @@ void CHyprionGrade::setResource(SP<CHyprionGradeV1> resource) {
             });
         }
         m_style.grade.colorize.gradient.angle = static_cast<float>(wl_fixed_to_double(angle) * std::numbers::pi / 180.0);
-                damage();
+        damage();
     });
 
     if (auto surface = m_surface.lock()) {
@@ -149,8 +140,7 @@ void CHyprionGrade::setResource(SP<CHyprionGradeV1> resource) {
         });
         m_surfaceCommitted = surface->m_events.commit.listen([this] {
             updateSupport();
-            if (auto m = monitor(); m && Hyprion::gradeProtocol)
-                Hyprion::gradeProtocol->markSourceDirty(m);
+            damage(false);
         });
         updateSupport();
     }
@@ -161,31 +151,33 @@ void CHyprionGrade::destroy() {
         Hyprion::gradeProtocol->destroyGrade(this);
 }
 
-CBox CHyprionGrade::surfaceLocalBox() const {
-    const auto surface = Desktop::View::CWLSurface::fromResource(m_surface.lock());
-    if (!surface)
-        return {0, 0, 0, 0};
 
-    const auto surfaceBox = surface->getSurfaceBoxGlobal();
-    if (!surfaceBox)
-        return {0, 0, 0, 0};
-
-    CBox box{surfaceBox->pos() + Vector2D{m_x, m_y}, Vector2D{m_width, m_height}};
-    return box.intersection(*surfaceBox);
+CBox CHyprionGrade::damageBox() const {
+    if (!m_enabled || !m_supported || m_width <= 0 || m_height <= 0)
+        return {};
+    const auto resource = m_surface.lock();
+    const auto surface = Desktop::View::CWLSurface::fromResource(resource);
+    const auto surfaceBox = surface ? surface->getSurfaceBoxGlobal() : std::nullopt;
+    if (!surfaceBox || !resource || resource->m_current.size.x <= 0 || resource->m_current.size.y <= 0)
+        return {};
+    const auto scale = surfaceBox->size() / resource->m_current.size;
+    CBox box{surfaceBox->pos() + Vector2D{m_x * scale.x, m_y * scale.y}, Vector2D{m_width * scale.x, m_height * scale.y}};
+    if (m_areas & HYPRION_GRADE_V1_AREA_OUTSET)
+        box = expandBox(box, m_outset * std::max(scale.x, scale.y));
+    return expandBox(box, 1.0).intersection(*surfaceBox);
 }
 
-void CHyprionGrade::damage() {
-    if (!g_pHyprRenderer)
+void CHyprionGrade::damage(bool force) {
+    const auto next = damageBox();
+    if (!force && next == m_lastDamageBox)
         return;
-
-    auto box = surfaceLocalBox();
-    if (box.width <= 0 || box.height <= 0)
-        return;
-
-    box.expand(m_radius + m_inset + m_outset + 2.F);
-    g_pHyprRenderer->damageBox(box);
-    if (auto m = monitor(); m && Hyprion::gradeProtocol)
-        Hyprion::gradeProtocol->markSourceDirty(m);
+    if (g_pHyprRenderer) {
+        if (!m_lastDamageBox.empty())
+            g_pHyprRenderer->damageBox(m_lastDamageBox);
+        if (!next.empty())
+            g_pHyprRenderer->damageBox(next);
+    }
+    m_lastDamageBox = next;
 }
 
 void CHyprionGrade::updateSupport() {
@@ -200,7 +192,9 @@ void CHyprionGrade::updateSupport() {
     if (!view)
         return;
 
-    const bool supported = view->type() == Desktop::View::VIEW_TYPE_LAYER_SURFACE;
+    const auto type = view->type();
+    const bool supported = type == Desktop::View::VIEW_TYPE_LAYER_SURFACE || type == Desktop::View::VIEW_TYPE_WINDOW ||
+        type == Desktop::View::VIEW_TYPE_SUBSURFACE || type == Desktop::View::VIEW_TYPE_POPUP;
     if (m_supportSent && supported == m_supported)
         return;
 
@@ -209,157 +203,68 @@ void CHyprionGrade::updateSupport() {
     m_resource->sendSupported(supported ? 1 : 0);
 }
 
-void CHyprionGrade::draw(Render::CRenderContext& ctx, PHLMONITOR monitor, const SP<Render::IFramebuffer>& snapshot) {
-    if (!m_resource || !monitor || !m_enabled || !m_supported || m_width <= 0 || m_height <= 0 || m_areas == 0)
+void CHyprionGrade::appendRequests(Render::CRenderContext& ctx, PHLMONITOR monitor, const CBox& surfaceBox, const CBox& clipBox, float alpha,
+                                  std::vector<SHyprionGradeRequest>& requests) const {
+    const auto surface = m_surface.lock();
+    if (!surface || !m_enabled || !m_supported || m_width <= 0 || m_height <= 0 || surface->m_current.size.x <= 0 || surface->m_current.size.y <= 0)
         return;
 
-    const auto box = boxFor(monitor);
-    if (box.width <= 0 || box.height <= 0)
+    const auto scale = surfaceBox.size() / surface->m_current.size;
+    const double shapeScale = std::min(scale.x, scale.y);
+    const CBox box{surfaceBox.pos() + Vector2D{m_x * scale.x, m_y * scale.y}, Vector2D{m_width * scale.x, m_height * scale.y}};
+    CBox surfaceClip = surfaceBox.copy().scale(monitor->m_scale).round();
+    if (!clipBox.empty())
+        surfaceClip = surfaceClip.intersection(clipBox);
+    ctx.m_data.renderModif.applyToBox(surfaceClip);
+    if (surfaceClip.empty())
         return;
 
-    const auto surface = Desktop::View::CWLSurface::fromResource(m_surface.lock());
-    const auto view = surface ? surface->view() : nullptr;
-    const auto layer = view ? Desktop::View::CLayerSurface::fromView(view) : nullptr;
-    if (!layer)
-        return;
-
-    const float alpha = layer->alpha()[Desktop::View::LS_ALPHA_FADE]->value();
-    const auto  draw = [&](SHyprionGradeArea area, const CBox& areaBox, float thickness) {
+    const auto draw = [&](SHyprionGradeArea area, double thickness) {
         const auto mode = m_mode >= 0 ? static_cast<SHyprionGradeMode>(m_mode)
                                      : (area == SHyprionGradeArea::OUTSET ? SHyprionGradeMode::OVER : SHyprionGradeMode::IN_PLACE);
-
-        auto&      renderData = ctx.m_data;
-        const auto modificationScale = renderData.renderModif.combinedScale();
-        const auto requestedThickness = std::round(std::round(static_cast<double>(thickness) * monitor->m_scale) * modificationScale);
-        const int  thicknessPx = static_cast<int>(std::clamp(requestedThickness, 0.0, 4096.0));
-        const auto baseRounding = std::max(0.0, static_cast<double>(m_radius) * monitor->m_scale - 1.0) * modificationScale;
-        const float roundingPower = std::clamp(std::isfinite(m_roundingPower) ? m_roundingPower : 2.0F, 1.0F, 10.0F);
-        if (!std::isfinite(baseRounding) || baseRounding < 0.0)
+        const double modificationScale = ctx.m_data.renderModif.combinedScale();
+        const double pixelScale = monitor->m_scale * modificationScale;
+        const int thicknessPx = static_cast<int>(std::clamp(std::round(thickness * pixelScale), 0.0, 4096.0));
+        if (area != SHyprionGradeArea::FILL && thicknessPx == 0)
             return;
-
-        CBox renderBox = areaBox;
-        renderBox.scale(monitor->m_scale).round();
-        renderData.renderModif.applyToBox(renderBox);
-        if (renderBox.width <= 0.0 || renderBox.height <= 0.0 || !std::isfinite(renderBox.width) || !std::isfinite(renderBox.height))
+        const double baseRounding = std::max(0.0, m_radius * shapeScale * monitor->m_scale - 1.0) * modificationScale;
+        CBox renderBox = box.copy().scale(monitor->m_scale).round();
+        ctx.m_data.renderModif.applyToBox(renderBox);
+        // Expand by the same integer thickness that the shader uses. This keeps
+        // fractional-scale coverage, source copies and clipping in agreement.
+        if (area == SHyprionGradeArea::OUTSET)
+            renderBox = expandBox(renderBox, thicknessPx);
+        if (renderBox.empty())
             return;
-
         double rounding = baseRounding;
         double innerRounding = 0.0;
         if (area == SHyprionGradeArea::OUTSET) {
-            const double correction = static_cast<double>(thicknessPx) * (std::sqrt(2.0) - 1.0) * std::max(2.0 - roundingPower, 0.0);
+            const double correction = thicknessPx * (std::sqrt(2.0) - 1.0) * std::max(2.0 - m_roundingPower, 0.0);
             rounding = baseRounding > 0.0 ? baseRounding + thicknessPx - correction : 0.0;
             innerRounding = baseRounding;
-        } else if (area == SHyprionGradeArea::INSET) {
+        } else if (area == SHyprionGradeArea::INSET)
             innerRounding = std::max(baseRounding - thicknessPx, 0.0);
-        }
-
         const double halfSize = std::min(renderBox.width, renderBox.height) * 0.5;
-        const int    roundingPx = static_cast<int>(std::clamp(rounding, 0.0, halfSize));
-        const int    innerRoundingPx = static_cast<int>(std::clamp(innerRounding, 0.0, halfSize));
-
-        hyprionDrawGrade(ctx, monitor,
-                         SHyprionGradeRequest{
-                             .renderBox = renderBox,
-                             .area = area,
-                             .mode = mode,
-                             .source = SHyprionGradeSource::CURRENT_FRAMEBUFFER,
-                             .thickness = thicknessPx,
-                             .rounding = roundingPx,
-                             .innerRounding = innerRoundingPx,
-                             .snapshotExtent = 0,
-                             .roundingPower = roundingPower,
-                             .style = m_style,
-                             .orbit = {},
-                             .cornerArcTable = {},
-                             .alpha = alpha,
-                             .fullSnapshot = true,
-                             .snapshotOnly = false,
-                             .snapshot = snapshot,
-                             .clipToDamageBox = false,
-                         });
+        requests.push_back(SHyprionGradeRequest{
+            .renderBox = renderBox,
+            .area = area,
+            .mode = mode,
+            .thickness = thicknessPx,
+            .rounding = static_cast<int>(std::clamp(rounding, 0.0, halfSize)),
+            .innerRounding = static_cast<int>(std::clamp(innerRounding, 0.0, halfSize)),
+            .roundingPower = m_roundingPower,
+            .style = m_style,
+            .alpha = alpha,
+            .fullSnapshot = true,
+            .clipBox = surfaceClip,
+        });
     };
-
     if (m_areas & HYPRION_GRADE_V1_AREA_FILL)
-        draw(SHyprionGradeArea::FILL, box, 0.F);
+        draw(SHyprionGradeArea::FILL, 0.0);
     if ((m_areas & HYPRION_GRADE_V1_AREA_OUTSET) && m_outset > 0)
-        draw(SHyprionGradeArea::OUTSET, box.copy().expand(m_outset), static_cast<float>(m_outset));
+        draw(SHyprionGradeArea::OUTSET, m_outset * shapeScale);
     if ((m_areas & HYPRION_GRADE_V1_AREA_INSET) && m_inset > 0)
-        draw(SHyprionGradeArea::INSET, box, static_cast<float>(m_inset));
-}
-
-CBox CHyprionGrade::boxFor(PHLMONITOR monitor) const {
-    if (!monitor)
-        return {0, 0, 0, 0};
-
-    CBox box = surfaceLocalBox();
-    if (box.width <= 0 || box.height <= 0)
-        return {0, 0, 0, 0};
-
-    box.translate(-monitor->m_position);
-    if (box.intersection(monitor->logicalBox()).empty())
-        return {0, 0, 0, 0};
-    return box;
-}
-
-PHLMONITOR CHyprionGrade::monitor() const {
-    const auto surface = Desktop::View::CWLSurface::fromResource(m_surface.lock());
-    const auto view = surface ? surface->view() : nullptr;
-    const auto layer = view ? Desktop::View::CLayerSurface::fromView(view) : nullptr;
-    return layer ? layer->m_monitor.lock() : nullptr;
-}
-
-CBox CHyprionGrade::snapshotBounds(Render::CRenderContext& ctx, PHLMONITOR monitor) const {
-    if (!monitor || !m_enabled || !m_supported || m_width <= 0 || m_height <= 0 || m_areas == 0)
-        return {0, 0, 0, 0};
-
-    CBox box = boxFor(monitor);
-    if (box.width <= 0 || box.height <= 0)
-        return {0, 0, 0, 0};
-
-    if ((m_areas & HYPRION_GRADE_V1_AREA_OUTSET) && m_outset > 0)
-        box.expand(m_outset);
-
-    box.scale(monitor->m_scale).round();
-    ctx.m_data.renderModif.applyToBox(box);
-    box.transform(Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform)), monitor->m_transformedSize.x, monitor->m_transformedSize.y);
-    box.round();
-    return box;
-}
-
-void CHyprionGrade::damageSourceBand(PHLMONITOR monitor) {
-    if (!m_resource || !monitor || !m_enabled || !m_supported || m_width <= 0 || m_height <= 0 || m_areas == 0)
-        return;
-
-    const auto box = boxFor(monitor);
-    if (box.width <= 0 || box.height <= 0)
-        return;
-
-    CRegion damage;
-    if ((m_areas & HYPRION_GRADE_V1_AREA_OUTSET) && m_outset > 0) {
-        CRegion band{box.copy().expand(m_outset)};
-        band.subtract(box);
-        damage.add(band);
-    }
-    if ((m_areas & HYPRION_GRADE_V1_AREA_INSET) && m_inset > 0) {
-        CRegion band{box};
-        band.subtract(box.copy().expand(-m_inset));
-        damage.add(band);
-    }
-    if (m_areas & HYPRION_GRADE_V1_AREA_FILL)
-        damage.add(box);
-
-    if (damage.empty())
-        return;
-
-    damage.expand(m_radius + 2.0);
-    const auto scaled = damage.copy().scale(monitor->m_scale);
-    CRegion rounded;
-    scaled.forEachRect([&rounded](const auto& rect) {
-        CBox box{static_cast<double>(rect.x1), static_cast<double>(rect.y1), static_cast<double>(rect.x2 - rect.x1), static_cast<double>(rect.y2 - rect.y1)};
-        box.round();
-        rounded.add(box);
-    });
-    monitor->addDamage(rounded);
+        draw(SHyprionGradeArea::INSET, m_inset * shapeScale);
 }
 
 CHyprionGradeProtocol::CHyprionGradeProtocol() : IWaylandProtocol(&hyprion_grade_manager_v1_interface, 1, "HyprionGrade") {
@@ -388,10 +293,12 @@ void CHyprionGradeProtocol::destroyManager(CHyprionGradeManagerV1* manager) {
 void CHyprionGradeProtocol::destroyGrade(CHyprionGrade* grade) {
     if (!grade)
         return;
+    grade->m_enabled = false;
+    grade->damage();
     if (grade->m_surfacePtr) {
         const auto it = m_bySurface.find(grade->m_surfacePtr);
         if (it != m_bySurface.end()) {
-            std::erase(it->second, grade);
+            std::erase_if(it->second, [grade](const auto& other) { return other.get() == grade; });
             if (it->second.empty())
                 m_bySurface.erase(it);
         }
@@ -399,59 +306,6 @@ void CHyprionGradeProtocol::destroyGrade(CHyprionGrade* grade) {
     std::erase_if(m_grades, [grade](const auto& other) { return other.get() == grade; });
 }
 
-void CHyprionGradeProtocol::markSourceDirty(PHLMONITOR monitor) {
-    if (monitor)
-        m_dirtyMonitors.insert(static_cast<uint64_t>(monitor->m_id));
-}
-
-void CHyprionGradeProtocol::syncSourceListeners(PHLMONITOR monitor) {
-    if (!monitor)
-        return;
-
-    const auto attach = [this, monitor](const SP<CWLSurfaceResource>& surface) {
-        if (!surface)
-            return;
-
-        const auto [it, inserted] = m_sourceListeners.try_emplace(surface.get());
-        if (!inserted)
-            return;
-
-        PHLMONITORREF monitorRef = monitor;
-        it->second.commit = surface->m_events.commit.listen([this, monitorRef] {
-            if (auto m = monitorRef.lock())
-                markSourceDirty(m);
-        });
-        it->second.destroy = surface->m_events.destroy.listen([this, key = surface.get()] { m_sourceListeners.erase(key); });
-    };
-
-    for (const auto& layerList : monitor->m_layerSurfaceLayers) {
-        for (const auto& layerRef : layerList) {
-            const auto layer = layerRef.lock();
-            if (!layer || !layer->mapped() || !layer->wlSurface())
-                continue;
-
-            const auto root = layer->wlSurface()->resource();
-            if (!root)
-                continue;
-
-            root->breadthfirst([&attach](SP<CWLSurfaceResource> surface, const Vector2D&, void*) { attach(surface); }, nullptr);
-        }
-    }
-}
-
-void CHyprionGradeProtocol::damageDirtyBands(PHLMONITOR monitor) {
-    if (!monitor)
-        return;
-
-    const auto erased = m_dirtyMonitors.erase(static_cast<uint64_t>(monitor->m_id));
-    if (erased == 0)
-        return;
-
-    for (const auto& grade : m_grades) {
-        if (grade && grade->monitor() == monitor)
-            grade->damageSourceBand(monitor);
-    }
-}
 
 void CHyprionGradeProtocol::getGrade(CHyprionGradeManagerV1* manager, uint32_t id, wl_resource* surfaceResource) {
     const auto surface = CWLSurfaceResource::fromResource(surfaceResource);
@@ -460,7 +314,7 @@ void CHyprionGradeProtocol::getGrade(CHyprionGradeManagerV1* manager, uint32_t i
         return;
     }
 
-    const auto grade = m_grades.emplace_back(makeUnique<CHyprionGrade>(makeShared<CHyprionGradeV1>(manager->client(), manager->version(), id), surface)).get();
+    const auto grade = m_grades.emplace_back(makeShared<CHyprionGrade>(makeShared<CHyprionGradeV1>(manager->client(), manager->version(), id), surface));
     if (!grade->good()) {
         manager->noMemory();
         m_grades.pop_back();
@@ -471,62 +325,61 @@ void CHyprionGradeProtocol::getGrade(CHyprionGradeManagerV1* manager, uint32_t i
 
 class CHyprionGradeGroupPassElement final : public IPassElement {
   public:
-    CHyprionGradeGroupPassElement(std::vector<CHyprionGrade*> grades, PHLMONITOR monitor) : m_grades(std::move(grades)), m_monitor(monitor) {}
+    CHyprionGradeGroupPassElement(std::vector<SP<CHyprionGrade>> grades, CSurfacePassElement& surface) :
+        m_grades(std::move(grades)), m_monitor(surface.m_data.pMonitor), m_surfaceBox(surface.getTexBox()), m_clipBox(surface.m_data.clipBox),
+        m_alpha(surface.m_data.alpha * surface.m_data.fadeAlpha) {
+        if (const auto wlSurface = Desktop::View::CWLSurface::fromResource(surface.m_data.surface))
+            m_alpha *= wlSurface->m_alphaModifier * wlSurface->m_overallOpacity;
+    }
 
     std::vector<UP<IPassElement>> draw(Render::CRenderContext& ctx) override {
-        CBox bounds;
-        for (auto* grade : m_grades) {
-            if (!grade)
-                continue;
-            addBox(bounds, grade->snapshotBounds(ctx, m_monitor));
-        }
-        if (bounds.width <= 0.0 || bounds.height <= 0.0)
+        const auto monitor = m_monitor.lock();
+        if (!monitor || m_alpha <= 0.F)
             return {};
+        std::vector<SHyprionGradeRequest> requests;
+        requests.reserve(m_grades.size());
+        for (const auto& grade : m_grades)
+            grade->appendRequests(ctx, monitor, m_surfaceBox, m_clipBox, m_alpha, requests);
 
-        SP<Render::IFramebuffer> snapshot;
-        if (!hyprionCaptureGradeSnapshot(ctx, m_monitor, snapshot, bounds))
-            return {};
-        for (auto* grade : m_grades)
-            if (grade)
-                grade->draw(ctx, m_monitor, snapshot);
+        SHyprionGradeSnapshot snapshot;
+        for (std::size_t begin = 0; begin < requests.size();) {
+            CRegion sources;
+            std::size_t end = begin;
+            for (; end < requests.size(); ++end) {
+                auto region = hyprionGradeRegion(requests[end]).intersect(ctx.m_data.damage);
+                // A later overlapping grade must see the result of every earlier
+                // grade. Disjoint requests can safely share an immutable capture.
+                if (!sources.copy().intersect(region).empty())
+                    break;
+                sources.add(region);
+            }
+            if (!sources.empty() && hyprionCaptureGradeSnapshot(ctx, monitor, snapshot, hyprionGradeFramebufferRegion(ctx, sources))) {
+                for (auto i = begin; i < end; ++i) {
+                    requests[i].snapshot = &snapshot;
+                    hyprionDrawGrade(ctx, monitor, requests[i]);
+                }
+            }
+            begin = end;
+        }
         return {};
     }
 
-    bool needsLiveBlur(Render::CRenderContext&) override {
-        return false;
-    }
-
-    bool needsPrecomputeBlur(Render::CRenderContext&) override {
-        return false;
-    }
-
-    const char* passName() override {
-        return "hyprion-grade-group";
-    }
-
-    ePassElementType type() override {
-        return EK_CUSTOM;
-    }
-
-    std::optional<CBox> boundingBox(Render::CRenderContext&) override {
-        return std::nullopt;
-    }
-
-    bool disableSimplification(Render::CRenderContext&) override {
-        return true;
-    }
+    bool needsLiveBlur(Render::CRenderContext&) override { return false; }
+    bool needsPrecomputeBlur(Render::CRenderContext&) override { return false; }
+    const char* passName() override { return "hyprion-grade"; }
+    ePassElementType type() override { return EK_CUSTOM; }
+    std::optional<CBox> boundingBox(Render::CRenderContext&) override { return m_surfaceBox; }
 
   private:
-    std::vector<CHyprionGrade*> m_grades;
-    PHLMONITOR                  m_monitor;
+    std::vector<SP<CHyprionGrade>> m_grades;
+    PHLMONITORREF m_monitor;
+    CBox m_surfaceBox, m_clipBox;
+    float m_alpha;
 };
 
-void CHyprionGradeProtocol::queue(Render::CRenderContext& ctx, const PHLLS& layer, PHLMONITOR monitor) {
-    if (!layer || !layer->mapped() || !monitor || !layer->wlSurface())
-        return;
-    const auto it = m_bySurface.find(layer->wlSurface()->resource().get());
+void CHyprionGradeProtocol::queue(Render::CRenderPass& pass, CSurfacePassElement& surface) {
+    const auto it = m_bySurface.find(surface.m_data.surface.get());
     if (it == m_bySurface.end() || it->second.empty())
         return;
-    syncSourceListeners(monitor);
-    g_pHyprRenderer->addPassElement(ctx, makeUnique<CHyprionGradeGroupPassElement>(it->second, monitor));
+    pass.add(makeUnique<CHyprionGradeGroupPassElement>(it->second, surface));
 }

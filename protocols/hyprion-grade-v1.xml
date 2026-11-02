@@ -13,9 +13,10 @@
 
       Grades are surface-local and clipped to the surface that owns them.
       The capabilities event describes the area and mode bits this compositor
-      implements. Pixels are always sampled from the framebuffer after the
-      surface has been drawn; blur is requested separately through
-      ext-background-effect-v1.
+      implements. Pixels are sampled from the current composite immediately
+      after the owning surface is drawn, before higher surfaces, including its
+      higher subsurfaces. Transparent pixels sample the visible backdrop.
+      Blur is requested separately through ext-background-effect-v1.
     </description>
 
     <event name="capabilities">
@@ -27,7 +28,8 @@
     <request name="get_grade">
       <description summary="create a grade object for a surface">
         Multiple grade objects may be attached to the same surface. They are
-        rendered in creation order.
+        rendered in creation order; overlapping grades sample earlier results.
+        Selected areas within an object execute as fill, outset, then inset.
       </description>
       <arg name="id" type="new_id" interface="hyprion_grade_v1"/>
       <arg name="surface" type="object" interface="wl_surface"/>
@@ -42,7 +44,9 @@
     <description summary="one sampled colour grade">
       Coordinates are surface-local logical pixels. The box is the graded
       area; the area selects inset, outset, both, or fill. The grade is
-      clipped to the owning surface and never paints outside it.
+      clipped to the owning surface without changing the shape geometry.
+      Outsets extend outside the box, never outside the owning surface;
+      transparent surface padding allows them to sample the backdrop.
     </description>
 
     <enum name="area" bitfield="true">

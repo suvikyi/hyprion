@@ -19,14 +19,14 @@ own fallback for other compositors.
 
 Hyprion owns a plugin-local `hyprion_grade_manager_v1` global. A Wayland client
 attaches a grade object to a `wl_surface`, supplies a surface-local box, an
-area, a mode, and style parameters, and Hyprion draws the grade while that
-surface is rendered. The client receives no pixels and needs no screencopy
-permission; the compositor samples the exact framebuffer it already uses for
-window effects.
+area, a mode, and style parameters, and Hyprion draws the grade immediately
+after that surface, before higher surfaces in the scene. The client receives
+no pixels and needs no screencopy permission.
 
 A grade is the primitive; inset/outset bands, glazes, shades, colorizations and washes
 are effects built from it. The implementation advertises the inset, outset and
-fill areas, plus `in_place` and `over` modes, on layer-shell surfaces. Colorize
+fill areas, plus `in_place` and `over` modes, on layer-shell surfaces, ordinary
+Wayland windows, subsurfaces and popups. Colorize
 targets use a separate `set_colorize_gradient` request with up to ten sRGB
 stops and an angle in degrees; a single stop is a flat color. `in_place`
 applies the transform to the sampled pixels and preserves their alpha; `over`
@@ -37,6 +37,36 @@ result. The client side lives in [irides](https://github.com/suvikyi/irides): it
 `Grade` component uses this path when the global and requested area/mode are
 present, and keeps its local ShaderEffect as the fallback for other compositors.
 That fallback is SDR-only.
+
+Grades sample the current composite: opaque client pixels, translucent client
+pixels blended with their backdrop, or the backdrop alone in transparent
+space. An outset is outside its **box**, not outside its owning `wl_surface`;
+provide transparent surface padding for an exterior border. Clipping never
+changes the original shape geometry.
+
+Grades on one surface execute in creation order and overlapping grades sample
+earlier results. Within one grade object, selected areas execute as fill,
+outset, then inset. A parent surface's grade precedes its higher subsurfaces;
+it does not act as an overlay over the completed surface tree. Items flattened
+into one Qt surface cannot be interleaved with compositor effects individually.
+
+Snapshots copy only conservative mask regions intersecting the current
+damage. Disjoint requests share a capture; overlapping requests introduce a
+new capture boundary. Reusable compact scratch pages hold the copied
+rectangles, with separate pools for horizontal bands, vertical bands and fills.
+Pages retain their peak capacity until the monitor is removed or the plugin
+is unloaded. A large fill therefore costs proportionally more than a thin
+border; there is no compulsory full-screen scene copy or cursor-driven redraw.
+Hyprland's normal damage reconstruction and occlusion pruning remain enabled.
+
+### Migration from 0.3.x to 0.4.0
+
+Root-layer grades no longer overlay the whole subsurface tree, and overlapping
+grades on the same surface no longer use an independent shared source. Attach
+a grade to the surface that should own it, and create overlapping grades in
+the intended effect order. Existing inset/outset/fill settings and protocol
+requests are unchanged.
+
 
 ## Install
 

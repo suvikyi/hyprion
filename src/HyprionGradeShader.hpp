@@ -76,6 +76,7 @@ uniform sampler2D uHorizontal;
 uniform sampler2D uVertical;
 uniform sampler2D uSnapshot;
 uniform int uFullSnapshot;
+uniform ivec2 uSnapshotOffset;
 uniform int uAreaMode;
 uniform int uMode;
 uniform vec4 uWindowBox;
@@ -437,7 +438,7 @@ void main() {
 
     vec4 sampleColor;
     if (uFullSnapshot == 1) {
-        sampleColor = texelFetch(uSnapshot, pixel, 0);
+        sampleColor = texelFetch(uSnapshot, pixel - uSnapshotOffset, 0);
     } else if (pixel.y < bottom + snapshotExtent) {
         sampleColor = texelFetch(uHorizontal, ivec2(pixel.x, pixel.y - bottom), 0);
     } else if (pixel.y >= top - snapshotExtent) {

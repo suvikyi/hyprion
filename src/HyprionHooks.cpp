@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
+#include <stdexcept>
 
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/view/LayerSurface.hpp>
@@ -14,6 +15,7 @@
 #include <hyprland/src/plugins/HookSystem.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/render/decorations/CHyprDropShadowDecoration.hpp>
+#include <hyprland/src/render/pass/SurfacePassElement.hpp>
 
 using namespace Hyprutils::Memory;
 
@@ -22,7 +24,7 @@ namespace {
     HANDLE                                                        hookHandle = nullptr;
     CFunctionHook*                                                shadowHook = nullptr;
     CFunctionHook*                                                shadowDrawHook = nullptr;
-    CFunctionHook*                                                gradeLayerHook = nullptr;
+    CFunctionHook*                                                gradePassHook = nullptr;
     std::unordered_map<CHyprDropShadowDecoration*, PHLWINDOWREF> shadowWindows;
 
     CHyprionDecoration* findDecoration(const PHLWINDOW& window) {
@@ -65,13 +67,14 @@ namespace {
         reinterpret_cast<Original>(shadowDrawHook->m_original)(shadow, ctx, monitor, alpha, presentation);
     }
 
-    void renderLayerHook(Render::IHyprRenderer* self, Render::CRenderContext& ctx, PHLLS layer, PHLMONITOR monitor, const Time::steady_tp& time, bool popups,
-                         bool lockscreen, bool workspaceScene) {
-        using Original = void (*)(Render::IHyprRenderer*, Render::CRenderContext&, PHLLS, PHLMONITOR, const Time::steady_tp&, bool, bool, bool);
-        reinterpret_cast<Original>(gradeLayerHook->m_original)(self, ctx, layer, monitor, time, popups, lockscreen, workspaceScene);
-        if (!active || popups || !layer || !monitor || !Hyprion::gradeProtocol)
-            return;
-        Hyprion::gradeProtocol->queue(ctx, layer, monitor);
+    void addPassHook(Render::CRenderPass* pass, UP<IPassElement>&& element) {
+        auto* surface = element && element->type() == EK_SURFACE ? static_cast<CSurfacePassElement*>(element.get()) : nullptr;
+        using Original = void (*)(Render::CRenderPass*, UP<IPassElement>&&);
+        reinterpret_cast<Original>(gradePassHook->m_original)(pass, std::move(element));
+        // Insert only after an actual surface pass, so visibility/capture policy
+        // and the scene's sibling/subsurface order remain Hyprland's decision.
+        if (active && surface && Hyprion::gradeProtocol)
+            Hyprion::gradeProtocol->queue(*pass, *surface);
     }
 }
 
@@ -81,31 +84,35 @@ namespace Hyprion::Hooks {
         auto shadowMethods = HyprlandAPI::findFunctionsByName(handle, "getRenderData");
         std::erase_if(shadowMethods, [](const auto& match) { return !match.demangled.starts_with("CHyprDropShadowDecoration::getRenderData("); });
         if (shadowMethods.size() != 1)
-            return false;
+            throw std::runtime_error("hyprion: ambiguous or missing shadow getRenderData hook");
         shadowHook = HyprlandAPI::createFunctionHook(handle, shadowMethods.front().address, reinterpret_cast<void*>(&shadowRenderData));
         if (!shadowHook || !shadowHook->hook()) {
             uninstall();
-            return false;
+            throw std::runtime_error("hyprion: could not hook shadow getRenderData");
         }
 
         auto shadowDrawMethods = HyprlandAPI::findFunctionsByName(handle, "draw");
         std::erase_if(shadowDrawMethods, [](const auto& match) { return !match.demangled.starts_with("CHyprDropShadowDecoration::draw("); });
-        if (shadowDrawMethods.size() != 1)
-            return false;
+        if (shadowDrawMethods.size() != 1) {
+            uninstall();
+            throw std::runtime_error("hyprion: ambiguous or missing shadow draw hook");
+        }
         shadowDrawHook = HyprlandAPI::createFunctionHook(handle, shadowDrawMethods.front().address, reinterpret_cast<void*>(&drawShadow));
         if (!shadowDrawHook || !shadowDrawHook->hook()) {
             uninstall();
-            return false;
+            throw std::runtime_error("hyprion: could not hook shadow draw");
         }
 
-        auto layerMethods = HyprlandAPI::findFunctionsByName(handle, "renderLayer");
-        std::erase_if(layerMethods, [](const auto& match) { return !match.demangled.starts_with("Render::IHyprRenderer::renderLayer("); });
-        if (layerMethods.size() != 1)
-            return false;
-        gradeLayerHook = HyprlandAPI::createFunctionHook(handle, layerMethods.front().address, reinterpret_cast<void*>(&renderLayerHook));
-        if (!gradeLayerHook || !gradeLayerHook->hook()) {
+        auto passMethods = HyprlandAPI::findFunctionsByName(handle, "CRenderPass3add");
+        std::erase_if(passMethods, [](const auto& match) { return !match.demangled.starts_with("Render::CRenderPass::add("); });
+        if (passMethods.size() != 1) {
             uninstall();
-            return false;
+            throw std::runtime_error("hyprion: ambiguous or missing render pass add hook");
+        }
+        gradePassHook = HyprlandAPI::createFunctionHook(handle, passMethods.front().address, reinterpret_cast<void*>(&addPassHook));
+        if (!gradePassHook || !gradePassHook->hook()) {
+            uninstall();
+            throw std::runtime_error("hyprion: could not hook render pass add");
         }
 
         return true;
@@ -121,9 +128,9 @@ namespace Hyprion::Hooks {
             HyprlandAPI::removeFunctionHook(hookHandle, shadowHook);
             shadowHook = nullptr;
         }
-        if (gradeLayerHook) {
-            HyprlandAPI::removeFunctionHook(hookHandle, gradeLayerHook);
-            gradeLayerHook = nullptr;
+        if (gradePassHook) {
+            HyprlandAPI::removeFunctionHook(hookHandle, gradePassHook);
+            gradePassHook = nullptr;
         }
         shadowWindows.clear();
         hookHandle = nullptr;

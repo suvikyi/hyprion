@@ -1,6 +1,7 @@
 #include "HyprionSnapshotCache.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <format>
 #include <limits>
 #include <string>
@@ -157,20 +158,34 @@ namespace Hyprion {
         vertical->unbind();
     }
 
-    SP<Render::IFramebuffer> CSnapshotCache::ensureAtlas(PHLMONITOR monitor, const SP<Render::IFramebuffer>& source,
-                                                         const NColorManagement::PImageDescription& sourceDescription) {
-        auto& atlas = m_atlases[static_cast<uint64_t>(monitor->m_id)];
-        const auto descriptionId = sourceDescription->id();
-        if (atlas.fb && atlas.size == source->m_size && atlas.format == source->m_drmFormat && atlas.descriptionId == descriptionId)
-            return atlas.fb;
+    void CSnapshotCache::beginCapture(PHLMONITOR monitor) {
+        m_tiles[static_cast<uint64_t>(monitor->m_id)].used.fill(0);
+    }
 
-        atlas.fb = g_pHyprRenderer->createFB(std::format("hyprion-grade-atlas-{}", monitor->m_id));
-        if (!atlas.fb || !atlas.fb->alloc(static_cast<int>(source->m_size.x), static_cast<int>(source->m_size.y), source->m_drmFormat)) {
+    SP<Render::IFramebuffer> CSnapshotCache::ensureTile(PHLMONITOR monitor, const SP<Render::IFramebuffer>& source,
+                                                       const NColorManagement::PImageDescription& sourceDescription, const Vector2D& size) {
+        auto& pool = m_tiles[static_cast<uint64_t>(monitor->m_id)];
+        const std::size_t shape = size.x >= size.y * 4.0 ? 0 : size.y >= size.x * 4.0 ? 1 : 2;
+        auto& pages = pool.pages[shape];
+        const auto index = pool.used[shape]++;
+        if (index == pages.size())
+            pages.emplace_back();
+        auto& atlas = pages[index];
+        const auto descriptionId = sourceDescription->id();
+        const bool sameFormat = atlas.fb && atlas.format == source->m_drmFormat && atlas.descriptionId == descriptionId;
+        if (sameFormat && atlas.size.x >= size.x && atlas.size.y >= size.y)
+            return atlas.fb;
+        const Vector2D allocation{
+            std::max(sameFormat ? atlas.size.x : 0.0, std::ceil(size.x / 16.0) * 16.0),
+            std::max(sameFormat ? atlas.size.y : 0.0, std::ceil(size.y / 16.0) * 16.0)};
+
+        atlas.fb = g_pHyprRenderer->createFB(std::format("hyprion-grade-{}-{}-{}", monitor->m_id, shape, index));
+        if (!atlas.fb || !atlas.fb->alloc(static_cast<int>(allocation.x), static_cast<int>(allocation.y), source->m_drmFormat)) {
             atlas.fb.reset();
             return nullptr;
         }
         atlas.fb->setImageDescription(sourceDescription);
-        atlas.size = source->m_size;
+        atlas.size = allocation;
         atlas.format = source->m_drmFormat;
         atlas.descriptionId = descriptionId;
         return atlas.fb;
@@ -178,13 +193,13 @@ namespace Hyprion {
 
     void CSnapshotCache::clear() {
         m_strips.clear();
-        m_atlases.clear();
+        m_tiles.clear();
     }
 
     void CSnapshotCache::destroyMonitor(PHLMONITOR monitor) {
         if (!monitor)
             return;
         m_strips.erase(static_cast<uint64_t>(monitor->m_id));
-        m_atlases.erase(static_cast<uint64_t>(monitor->m_id));
+        m_tiles.erase(static_cast<uint64_t>(monitor->m_id));
     }
 }
