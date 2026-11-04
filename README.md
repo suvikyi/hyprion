@@ -21,7 +21,10 @@ absent or fragmented edges, especially when no outset had populated the cache.
 
 
 
-Requires **Hyprland 0.57.0**, matching development headers, and the OpenGL renderer.
+Requires **Hyprland 0.57.1**, matching development headers, and the OpenGL renderer.
+Hyprland's plugin ABI includes the compositor commit and its Aquamarine,
+Hyprutils, Hyprgraphics, Hyprcursor and Hyprlang versions, so rebuild after any
+Hyprland update (`hyprpm update`) rather than reusing an older library.
 
 Hyprion is pronounced like **Hyperion**.
 
